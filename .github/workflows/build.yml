@@ -30,10 +30,10 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build, create ECR repo if needed, and push Docker images
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
-          AWS_REGION="<AWS_REGION>"
-          ACCOUNT_ID="<AWS_ACCOUNT_ID>"
-
           # Fetch latest main branch for diff
           git fetch origin main
 
