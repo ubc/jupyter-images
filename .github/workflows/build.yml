@@ -59,7 +59,7 @@ jobs:
               # Check if ECR repo exists, create if not
               if ! aws ecr describe-repositories --repository-names "$IMAGE_NAME" > /dev/null 2>&1; then
                 echo "ECR repository $IMAGE_NAME does not exist. Creating..."
-                aws ecr create-repository --repository-name "$IMAGE_NAME" > /dev/null
+                aws ecr create-repository --repository-name "$IMAGE_NAME" > /dev/null || true
               else
                 echo "ECR repository $IMAGE_NAME already exists."
               fi
