@@ -37,11 +37,13 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
-          # Fetch latest main branch for diff
-          git fetch origin main
+          # List commits for debugging
+          echo "Previous SHA: ${{ github.event.before }}"
+          echo "Current SHA: ${{ github.sha }}"
 
-          # Get changed files between main and current HEAD
-          changed_files=$(git diff --name-only origin/main HEAD)
+          # Get changed files between last and current commit
+          changed_files=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+
           echo "Changed files:"
           echo "$changed_files"
 
