@@ -44,7 +44,7 @@ RUN R -e "install.packages(c( \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/translate/translate_0.1.2.tar.gz', repos=NULL, type='source')"
 
 # Copy and run common install script
-COPY ../install-common.sh /tmp/install-common.sh
+COPY install-common.sh /tmp/install-common.sh
 #RUN chmod +x /tmp/install-common.sh && /bin/bash /tmp/install-common.sh
 RUN chmod +x /tmp/install-common.sh && ls -l /tmp/install-common.sh && head -n 20 /tmp/install-common.sh
 RUN /bin/bash -x /tmp/install-common.sh
