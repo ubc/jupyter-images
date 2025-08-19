@@ -43,13 +43,11 @@ RUN R -e "install.packages(c( \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/lisp/lisp_0.1.tar.gz', repos=NULL, type='source')" && \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/translate/translate_0.1.2.tar.gz', repos=NULL, type='source')"
 
-# Copy and run common install script
+# Copy and run common install script as root
+USER root
 COPY install-common.sh /tmp/install-common.sh
-#RUN chmod +x /tmp/install-common.sh && /bin/bash /tmp/install-common.sh
-#RUN chmod +x /tmp/install-common.sh 
-RUN ls -la /tmp
-#RUN head -n 20 /tmp/install-common.sh
-#RUN /bin/bash -x /tmp/install-common.sh
+RUN chmod +x /tmp/install-common.sh && /bin/bash -x /tmp/install-common.sh
+USER ${NB_UID}
 
 # Fix R locale issue
 RUN echo "LC_ALL=en_US.UTF-8" >> /opt/conda/lib/R/etc/Renviron
