@@ -65,8 +65,11 @@ jobs:
               fi
 
               # Build and push image
-              docker build -f "$dir/Dockerfile" -t "$ECR_REPO" .
-              docker push "$ECR_REPO"
+              TAG="${GITHUB_SHA::7}"
+              docker build -f "$dir/Dockerfile" -t "$ECR_REPO:$TAG" .
+              docker push "$ECR_REPO:$TAG"
+              docker tag "$ECR_REPO:$TAG" "$ECR_REPO:latest"
+              docker push "$ECR_REPO:latest"
             else
               echo "No changes in $dir, skipping build."
             fi
