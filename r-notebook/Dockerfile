@@ -46,10 +46,10 @@ RUN R -e "install.packages(c( \
 # Copy and run common install script
 COPY install-common.sh /tmp/install-common.sh
 #RUN chmod +x /tmp/install-common.sh && /bin/bash /tmp/install-common.sh
-RUN chmod +x /tmp/install-common.sh 
-RUN ls -l /tmp/install-common.sh
-RUN head -n 20 /tmp/install-common.sh
-RUN /bin/bash -x /tmp/install-common.sh
+#RUN chmod +x /tmp/install-common.sh 
+RUN ls -la /tmp
+#RUN head -n 20 /tmp/install-common.sh
+#RUN /bin/bash -x /tmp/install-common.sh
 
 # Fix R locale issue
 RUN echo "LC_ALL=en_US.UTF-8" >> /opt/conda/lib/R/etc/Renviron
