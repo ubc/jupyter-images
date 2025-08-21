@@ -9,6 +9,7 @@ pip install nbgitpuller \
     jupyterlab-code-formatter \
     jupyterlab-spreadsheet-editor \
     jupyterlab_templates \
+    jupyter-resource-usage \
     otter-grader \
     vl-convert-python \
     "vegafusion[embed]" \
