@@ -3,8 +3,8 @@ FROM $BASE_CONTAINER
 
 USER root
 
-RUN apt-get update && \
-    apt-get install -y \
+RUN apt-get update
+RUN apt-get install -y \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -21,8 +21,8 @@ RUN apt-get update && \
     libgbm1 \
     libasound2 \
     git \
-    curl \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    curl 
+RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 USER root
 COPY environment.yml /tmp/environment.yml
