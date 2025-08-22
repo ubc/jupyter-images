@@ -26,7 +26,7 @@ RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 USER root
 
-RUN conda install -y -c mamba
+RUN conda install -y -c conda-forge mamba
 COPY environment.yml /tmp/environment.yml
 RUN mamba env create -f /tmp/environment.yml -p /opt/conda/envs/my_notebook && conda clean --all -y
 
