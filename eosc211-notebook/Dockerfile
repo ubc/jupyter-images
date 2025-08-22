@@ -26,15 +26,13 @@ RUN apt-get update && \
 
 USER $NB_UID
 
-# Copy environment.yml and postBuild into the container
 COPY environment.yml /tmp/environment.yml
-COPY postBuild /tmp/postBuild
 
 USER root
 RUN conda install -y mamba -n base -c conda-forge && \
     mamba env create -f /tmp/environment.yml && \
     conda clean --all -y
-RUN chmod +x /tmp/postBuild && /tmp/postBuild && rm /tmp/postBuild
+RUN conda run -n my_notebook playwright install chromium
 
 USER $NB_UID
 RUN echo "conda activate e211_notebook" >> /home/jovyan/.bashrc
