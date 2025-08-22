@@ -19,7 +19,7 @@ RUN apt-get install -y \
     libxfixes3 \
     libxrandr2 \
     libgbm1 \
-    libasound2 \
+    libasound2t64 \
     git \
     curl 
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
