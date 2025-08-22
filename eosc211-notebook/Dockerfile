@@ -25,16 +25,15 @@ RUN apt-get install -y \
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
 USER root
-COPY environment.yml /tmp/environment.yml
 
-RUN conda install -y mamba -n base -c conda-forge && \
-    mamba env create -f /tmp/environment.yml && \
-    conda clean --all -y
+RUN conda install -y -c mamba
+COPY environment.yml /tmp/environment.yml
+RUN mamba env create -f /tmp/environment.yml -p /opt/conda/envs/my_notebook && conda clean --all -y
 
 RUN conda run -n my_notebook playwright install chromium
 
 USER $NB_UID
-RUN echo "conda activate e211_notebook" >> /home/jovyan/.bashrc
+RUN echo "conda activate /opt/conda/envs/e211_notebook" >> /home/jovyan/.bashrc
 
 # Fix ownership
 USER root
