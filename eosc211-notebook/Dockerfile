@@ -24,14 +24,13 @@ RUN apt-get update && \
     curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-USER $NB_UID
-
+USER root
 COPY environment.yml /tmp/environment.yml
 
-USER root
 RUN conda install -y mamba -n base -c conda-forge && \
     mamba env create -f /tmp/environment.yml && \
     conda clean --all -y
+
 RUN conda run -n my_notebook playwright install chromium
 
 USER $NB_UID
