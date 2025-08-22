@@ -1,0 +1,4 @@
+#!/bin/bash
+set -ex
+#playwright install-deps
+playwright install chromium
