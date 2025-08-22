@@ -25,7 +25,7 @@ RUN apt-get update && \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 USER root
-COPY ./environment.yml /tmp/environment.yml
+COPY environment.yml /tmp/environment.yml
 
 RUN conda install -y mamba -n base -c conda-forge && \
     mamba env create -f /tmp/environment.yml && \
