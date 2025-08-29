@@ -38,7 +38,9 @@ RUN mamba install --yes -c conda-forge \
 # R packages from CRAN (source)
 RUN R -e "install.packages(c( \
     'ggiraphExtra', \
-    'sandwich' \
+    'sandwich', \
+    'car', \
+    'sf' \
 ), repos='https://cloud.r-project.org')" && \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/lisp/lisp_0.1.tar.gz', repos=NULL, type='source')" && \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/translate/translate_0.1.2.tar.gz', repos=NULL, type='source')"
