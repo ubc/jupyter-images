@@ -11,7 +11,7 @@ pip install nbgitpuller \
     jupyterlab-spreadsheet-editor \
     jupyterlab_templates \
     jupyter-resource-usage \
-    otter-grader
-    RUN pip install jupytext --upgrade
+    otter-grader \
+    jupytext --upgrade
 
 echo "Installation complete!"
