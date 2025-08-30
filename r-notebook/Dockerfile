@@ -11,6 +11,7 @@ RUN apt-get update && \
     wget \
     unzip \
     tzdata && \
+#    cmake && \
     apt-get clean && \
     apt-get autoremove -y
 
@@ -32,15 +33,16 @@ RUN mamba install --yes -c conda-forge \
     r-modelsummary \
     r-nsyllable \
     r-proxyc \
-    r-tidytext && \
+    r-tidytext \
+    r-car \
+    r-units \
+    r-sf && \
     mamba clean --all -f -y
 
 # R packages from CRAN (source)
 RUN R -e "install.packages(c( \
     'ggiraphExtra', \
-    'sandwich', \
-    'car', \
-    'sf' \
+    'sandwich' \
 ), repos='https://cloud.r-project.org')" && \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/lisp/lisp_0.1.tar.gz', repos=NULL, type='source')" && \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/translate/translate_0.1.2.tar.gz', repos=NULL, type='source')"
@@ -48,7 +50,7 @@ RUN R -e "install.packages(c( \
 # Copy and run common install script
 USER root
 COPY install-common.sh /tmp/install-common.sh
-RUN chmod +x /tmp/install-common.sh
+RUN chown jovyan:users /tmp/install-common.sh && chmod +x /tmp/install-common.sh
 USER ${NB_UID}
 RUN /bin/bash -x /tmp/install-common.sh
 
