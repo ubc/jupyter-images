@@ -26,7 +26,6 @@ RUN /bin/bash -x /tmp/install-common.sh
 
 # pip
 RUN pip install --no-cache-dir \
-    tensorflow \
     jupyter \
     opencv-python-headless \
     plotly \
