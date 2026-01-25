@@ -39,7 +39,7 @@ RUN pip install --no-cache-dir \
 
 # Add nbgrader global config for nbshare
 USER root
-COPY nbgrader_config.py /etc/jupyter/nbgrader_config.py
+COPY tensorflow-notebook/nbgrader_config.py /etc/jupyter/nbgrader_config.py
 RUN chmod 644 /etc/jupyter/nbgrader_config.py
 
 # Fix ownership in case root touched files
