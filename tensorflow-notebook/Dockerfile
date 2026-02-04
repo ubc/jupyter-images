@@ -11,6 +11,7 @@ RUN apt-get update && \
     wget \
     unzip \
     tzdata \
+    # temp add for installing nbgrader from source. should be removed when switch back to upstream
     nodejs \
     wkhtmltopdf && \
     apt-get clean && \
