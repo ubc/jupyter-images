@@ -41,8 +41,15 @@ jobs:
           echo "Previous SHA: ${{ github.event.before }}"
           echo "Current SHA: ${{ github.sha }}"
 
-          # Get changed files between last and current commit
-          changed_files=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+          BEFORE="${{ github.event.before }}"
+          if [ "$BEFORE" == "0000000000000000000000000000000000000000" ]; then
+             echo "New branch or tag detected. Determining changes against default branch."
+             # Use 3-dot diff to find changes reachable from HEAD but not from origin/main
+             changed_files=$(git diff --name-only origin/main...HEAD)
+          else
+             # Get changed files between last and current commit
+             changed_files=$(git diff --name-only "$BEFORE" "${{ github.sha }}")
+          fi
 
           echo "Changed files:"
           echo "$changed_files"
