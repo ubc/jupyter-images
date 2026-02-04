@@ -11,6 +11,7 @@ RUN apt-get update && \
     wget \
     unzip \
     tzdata \
+    nodejs \
     wkhtmltopdf && \
     apt-get clean && \
     apt-get autoremove -y
@@ -34,7 +35,7 @@ RUN pip install --no-cache-dir \
     torchvision \
     torchaudio \
     torch-inspect \
-    nbgrader \
+    git+https://github.com/ubc/nbgrader.git@fix/link-base-url \
     ngshare_exchange
 
 # Add nbgrader global config for nbshare
