@@ -39,7 +39,8 @@ RUN pip install --no-cache-dir \
     uncertainties \
     "vegafusion[embed]" \
     "vegafusion-jupyter[embed]" \
-    vl-convert-python
+    vl-convert-python \
+    jupyter-ai[all]
 
 # Fix ownership in case root touched files
 USER root
