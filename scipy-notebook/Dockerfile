@@ -40,7 +40,7 @@ RUN pip install --no-cache-dir \
     "vegafusion[embed]" \
     "vegafusion-jupyter[embed]" \
     vl-convert-python \
-    jupyter-ai \
+    jupyter-ai==3.0.0b9 \
     openai \
     anthropic \
     google-generativeai
