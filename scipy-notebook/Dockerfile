@@ -11,9 +11,16 @@ RUN apt-get update && \
     wget \
     unzip \
     tzdata \
-    wkhtmltopdf && \
+    wkhtmltopdf \
+    nodejs \
+    npm && \
     apt-get clean && \
     apt-get autoremove -y
+
+RUN npm install -g \
+        @anthropic-ai/claude-code \
+        @google/gemini-cli \
+        @zed-industries/codex-acp
 
 USER ${NB_UID}
 
@@ -41,6 +48,7 @@ RUN pip install --no-cache-dir \
     "vegafusion-jupyter[embed]" \
     vl-convert-python \
     jupyter-ai \
+    jupyter-ai-jupyternaut \
     openai \
     anthropic \
     google-generativeai
