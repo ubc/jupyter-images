@@ -37,10 +37,18 @@ RUN pip install --no-cache-dir \
     nbgrader \
     ngshare_exchange
 
-# Add nbgrader global config for nbshare
+# Add nbgrader config for nbshare (both global and user level)
+# Patch formgrader to remove Manage Students menu
 USER root
-COPY tensorflow-notebook/nbgrader_config.py /etc/jupyter/nbgrader_config.py
-RUN chmod 644 /etc/jupyter/nbgrader_config.py
+COPY tensorflow-notebook/nbgrader_config_global.py /etc/jupyter/nbgrader_config.py
+COPY tensorflow-notebook/nbgrader_config_user.py /home/jovyan/nbgrader_config.py
+COPY tensorflow-notebook/patch_formgrader.py /tmp/patch_formgrader.py
+RUN chmod 644 /etc/jupyter/nbgrader_config.py /home/jovyan/nbgrader_config.py && \
+    chmod 755 /tmp/patch_formgrader.py
+    
+# Run the patch
+USER ${NB_UID}
+RUN python3 /tmp/patch_formgrader.py
 
 # Fix ownership in case root touched files
 USER root
