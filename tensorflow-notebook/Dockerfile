@@ -41,9 +41,9 @@ RUN pip install --no-cache-dir \
 # Patch formgrader to remove Manage Students menu
 USER root
 COPY tensorflow-notebook/nbgrader_config_global.py /etc/jupyter/nbgrader_config.py
-COPY tensorflow-notebook/nbgrader_config_user.py /home/jovyan/nbgrader_config.py
+COPY tensorflow-notebook/nbgrader_config_user.py /etc/jupyter/nbgrader_config_user.py
 COPY tensorflow-notebook/patch_formgrader.py /tmp/patch_formgrader.py
-RUN chmod 644 /etc/jupyter/nbgrader_config.py /home/jovyan/nbgrader_config.py && \
+RUN chmod 644 /etc/jupyter/nbgrader_config.py /etc/jupyter/nbgrader_config_user.py && \
     chmod 755 /tmp/patch_formgrader.py
     
 # Run the patch
