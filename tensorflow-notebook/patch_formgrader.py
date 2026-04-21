@@ -130,4 +130,10 @@ patch_file(
     label="manage_students.js: disable openModal function"
 )
 
-print("Done.")
+# 6. Fix decode_dir in ngshare_exchange to create parent directories
+patch_file(
+    path=EXCHANGE,
+    old="            with open(dest_path, 'wb') as d:",
+    new="            os.makedirs(os.path.dirname(dest_path), exist_ok=True)\n            with open(dest_path, 'wb') as d:",
+    label="exchange.py: fix decode_dir to create parent directories"
+)
