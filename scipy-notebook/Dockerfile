@@ -11,12 +11,16 @@ RUN apt-get update && \
     wget \
     unzip \
     tzdata \
-    wkhtmltopdf \
-    nodejs \
-    npm && \
+    wkhtmltopdf && \
     apt-get clean && \
     apt-get autoremove -y
 
+# Install Node.js 22 LTS via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean
+
+# Install AI CLI tools
 RUN npm install -g \
         @anthropic-ai/claude-code \
         @google/gemini-cli \
