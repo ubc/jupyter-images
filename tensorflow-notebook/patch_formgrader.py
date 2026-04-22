@@ -5,7 +5,7 @@ PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
 TEMPLATE_DIR = f"/opt/conda/lib/python{PYTHON_VERSION}/site-packages/nbgrader/server_extensions/formgrader/templates/"
 APIHANDLERS = f"/opt/conda/lib/python{PYTHON_VERSION}/site-packages/nbgrader/server_extensions/formgrader/apihandlers.py"
 JS_DIR = f"/opt/conda/lib/python{PYTHON_VERSION}/site-packages/nbgrader/server_extensions/formgrader/static/js/"
-
+EXCHANGE = f"/opt/conda/lib/python{PYTHON_VERSION}/site-packages/ngshare_exchange/exchange.py"
 
 def patch_file(path, old, new, label):
     try:
