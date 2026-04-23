@@ -15,6 +15,16 @@ RUN apt-get update && \
     apt-get clean && \
     apt-get autoremove -y
 
+# Install Node.js 22 LTS via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean
+
+# Install AI CLI tools
+RUN npm install -g \
+        @anthropic-ai/claude-code \
+        @google/gemini-cli
+
 USER ${NB_UID}
 
 # R packages via mamba (conda-forge)
@@ -46,6 +56,14 @@ RUN R -e "install.packages(c( \
 ), repos='https://cloud.r-project.org')" && \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/lisp/lisp_0.1.tar.gz', repos=NULL, type='source')" && \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/translate/translate_0.1.2.tar.gz', repos=NULL, type='source')"
+
+# pip - jupyter-ai
+RUN pip install --no-cache-dir \
+    jupyter-ai \
+    jupyter-ai-jupyternaut \
+    anthropic \
+    openai \
+    google-generativeai
 
 # Copy and run common install script
 USER root
