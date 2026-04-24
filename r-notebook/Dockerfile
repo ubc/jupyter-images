@@ -23,7 +23,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
 # Install AI CLI tools
 RUN npm install -g \
         @anthropic-ai/claude-code \
-        @google/gemini-cli
+        @google/gemini-cli \
+        @zed-industries/codex-acp
 
 USER ${NB_UID}
 
@@ -63,7 +64,7 @@ RUN pip install --no-cache-dir \
     jupyter-ai-jupyternaut \
     anthropic \
     openai \
-    google-generativeai
+    google-genai
 
 # Copy and run common install script
 USER root

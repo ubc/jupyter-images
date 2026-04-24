@@ -55,7 +55,7 @@ RUN pip install --no-cache-dir \
     jupyter-ai-jupyternaut \
     openai \
     anthropic \
-    google-generativeai
+    google-genai
 
 # Fix ownership in case root touched files
 USER root
