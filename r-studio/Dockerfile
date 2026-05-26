@@ -76,14 +76,18 @@ RUN mkdir -p /home/jovyan \
 # Rocker installs packages to /usr/local, which is NOT persisted across sessions.
 # This creates a user-writable library inside the persistent home volume so
 # student-installed packages survive logout. The Renviron file points R there.
-# Note: the mkdir runs against the symlink, so the directory is actually
-# created inside the (eventual) persistent volume mount at /home/jovyan.
 RUN mkdir -p /home/rstudio/R/library \
-    && chown -R rstudio:rstudio /home/rstudio/R \
+    && chown -R rstudio:rstudio /home/jovyan \
     && echo "R_LIBS_USER=/home/rstudio/R/library" >> /usr/local/lib/R/etc/Renviron.site
 
 # ---- Default working directory ----
 WORKDIR /home/rstudio
+
+# ---- Switch to non-root user for runtime ----
+# Rocker creates the 'rstudio' user (UID 1000) in the base image.
+# jupyter-server refuses to run as root, and Z2JH expects UID 1000 by default,
+# so we explicitly switch before the container's CMD runs.
+USER rstudio
 
 # Z2JH's KubeSpawner will call `jupyterhub-singleuser` as the container command;
 # no CMD/ENTRYPOINT override needed here. RStudio is launched on demand via
