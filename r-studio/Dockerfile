@@ -65,10 +65,12 @@ RUN chmod -R a+r /srv/data
 # ---- Home directory symlink for Z2JH compatibility ----
 # Z2JH mounts the persistent home volume at /home/jovyan (hub-wide default).
 # Rocker/RStudio expects the user's home at /home/rstudio.
-# We replace /home/rstudio with a symlink to /home/jovyan so RStudio's
-# reads/writes land in the persistent volume. This must happen BEFORE the
-# R_LIBS_USER setup below, since that path is created inside the symlinked home.
-RUN rm -rf /home/rstudio && ln -s /home/jovyan /home/rstudio
+# We create /home/jovyan as the real directory and symlink /home/rstudio to it,
+# so RStudio's reads/writes land in the persistent volume at runtime.
+RUN mkdir -p /home/jovyan \
+    && chown rstudio:rstudio /home/jovyan \
+    && rm -rf /home/rstudio \
+    && ln -s /home/jovyan /home/rstudio
 
 # ---- Persistent user package library ----
 # Rocker installs packages to /usr/local, which is NOT persisted across sessions.
