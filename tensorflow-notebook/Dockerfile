@@ -1,8 +1,6 @@
 ARG BASE_CONTAINER=quay.io/jupyter/tensorflow-notebook:hub-5.5.0
 FROM $BASE_CONTAINER
 
-LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>" 
-
 USER root
 
 RUN apt-get update && \
