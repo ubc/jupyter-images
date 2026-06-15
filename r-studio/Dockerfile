@@ -31,6 +31,9 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 # GitHub Education account from inside RStudio (Tools > Global Options > Copilot).
 RUN echo "copilot-enabled=1" >> /etc/rstudio/rsession.conf
 
+# Link Quit Session menu with Hub Control
+RUN echo "browser-quit-href=/hub/home" >> /etc/rstudio/rsession.conf
+
 # ---- Course-specific R packages ----
 # Rocker is wired to Posit Package Manager, so these are fast binary installs.
 # Add/remove packages as the syllabus evolves; rebuilding the image is cheap.

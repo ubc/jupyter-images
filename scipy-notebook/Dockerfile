@@ -1,4 +1,4 @@
-ARG BASE_CONTAINER=quay.io/jupyter/scipy-notebook:hub-5.4.3
+ARG BASE_CONTAINER=quay.io/jupyter/scipy-notebook:hub-5.5.0
 FROM $BASE_CONTAINER
 
 LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>"
