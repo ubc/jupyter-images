@@ -36,6 +36,10 @@ USER ${NB_UID}
 RUN /bin/bash -x /tmp/install-common.sh
 
 # conda
+USER root
+RUN mkdir -p /home/jovyan/.cache/conda/pkgs/cache/shards && \
+    chown -R ${NB_UID}:users /home/jovyan/.cache
+USER ${NB_UID}
 RUN mamba install -y -c conda-forge \
     gdal \
     geos \
