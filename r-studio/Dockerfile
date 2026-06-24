@@ -32,7 +32,7 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 RUN echo "copilot-enabled=1" >> /etc/rstudio/rsession.conf
 
 # Link Quit Session menu with Hub Control
-RUN echo "browser-quit-href=/hub/home" >> /etc/rstudio/rsession.conf
+RUN echo "www-quit-href=/hub/home" >> /etc/rstudio/rserver.conf
 
 # ---- Course-specific R packages ----
 # Rocker is wired to Posit Package Manager, so these are fast binary installs.
