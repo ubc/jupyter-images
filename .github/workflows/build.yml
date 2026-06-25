@@ -37,12 +37,37 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
           ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
-          # List commits for debugging
-          echo "Previous SHA: ${{ github.event.before }}"
+          # Determine the base commit for the changed-files diff.
+          # github.event.before is the null SHA on a new branch's first push
+          # (and empty for pull_request events), which makes `git diff` abort
+          # with "fatal: bad object". Fall back to the merge-base with the
+          # default branch, then to the commit's first parent, so detection
+          # works for new branches, PRs, and normal pushes alike.
+          BEFORE="${{ github.event.before }}"
+          echo "Reported previous SHA: ${BEFORE:-<none>}"
           echo "Current SHA: ${{ github.sha }}"
 
-          # Get changed files between last and current commit
-          changed_files=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}")
+          if [ -z "$BEFORE" ] \
+             || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git rev-parse --verify --quiet "${BEFORE}^{commit}" >/dev/null; then
+            git fetch --no-tags origin main >/dev/null 2>&1 || true
+            BASE=$(git merge-base origin/main "${{ github.sha }}" 2>/dev/null || true)
+            if [ -z "$BASE" ]; then
+              BASE=$(git rev-parse --verify --quiet "${{ github.sha }}^" || true)
+            fi
+          else
+            BASE="$BEFORE"
+          fi
+
+          # Get changed files between the resolved base and the current commit.
+          if [ -n "$BASE" ]; then
+            echo "Diffing against base: $BASE"
+            changed_files=$(git diff --name-only "$BASE" "${{ github.sha }}")
+          else
+            # Root commit with no parent: treat every tracked file as changed.
+            echo "No diff base found; treating all tracked files as changed."
+            changed_files=$(git ls-tree -r --name-only "${{ github.sha }}")
+          fi
 
           echo "Changed files:"
           echo "$changed_files"
