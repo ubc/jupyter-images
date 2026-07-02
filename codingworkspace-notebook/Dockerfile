@@ -56,11 +56,17 @@ RUN /bin/bash -x /tmp/install-common.sh
 #   RUN --mount=type=secret,id=cw_token \
 #       pip install --no-cache-dir jupyter-server-proxy \
 #         "codingworkspace @ git+https://x-access-token:$(cat /run/secrets/cw_token)@github.com/kevinlb1/CodingWorkspace.git@<ref>"
-# `rw`: pip builds the local dir in-tree (writes codingworkspace.egg-info), so the
-# mount must be writable. BuildKit discards these writes — the host CW_SRC tree is
-# not modified.
-RUN --mount=type=bind,from=cwsrc,target=/cwsrc,rw \
-    pip install --no-cache-dir jupyter-server-proxy /cwsrc
+# pip builds a local dir in-tree (writes codingworkspace.egg-info), and this step
+# runs as NB_USER, who does not own the bind-mounted source. So copy the source
+# (minus heavy/dev dirs) into an NB_USER-owned temp dir, install from there, and
+# clean up. The host CW_SRC tree is never written to.
+RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
+    mkdir -p /tmp/cwbuild && \
+    tar -C /cwsrc \
+        --exclude=.git --exclude=.venv --exclude=var --exclude='__pycache__' \
+        --exclude='*.egg-info' -cf - . | tar -C /tmp/cwbuild -xf - && \
+    pip install --no-cache-dir jupyter-server-proxy /tmp/cwbuild && \
+    rm -rf /tmp/cwbuild
 
 # Append the server-proxy + default_url config to the base image's config.
 # DO NOT overwrite /etc/jupyter/jupyter_server_config.py — that clobbers the hub config.
