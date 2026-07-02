@@ -20,12 +20,14 @@
 #   IMAGE_TAG=trial          # image tag to push (default: trial)
 #   CW_TOKEN=ghp_xxx         # read token; default: $(gh auth token)
 #   PLATFORM=linux/amd64     # target arch; MUST match your EKS nodes
+#   AWS_PROFILE=shared       # AWS CLI profile to use (default: shared)
 set -euo pipefail
 
 : "${ECR_ACCOUNT:?set ECR_ACCOUNT to your AWS account id}"
 : "${AWS_REGION:?set AWS_REGION, e.g. ca-central-1}"
 IMAGE_TAG="${IMAGE_TAG:-trial}"
 PLATFORM="${PLATFORM:-linux/amd64}"
+AWS_PROFILE="${AWS_PROFILE:-shared}"
 IMAGE_NAME="codingworkspace-notebook"
 
 # Read token for the private CodingWorkspace repo. Default to the gh CLI login.
@@ -48,12 +50,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 echo ">> ECR login: ${REGISTRY}"
-aws ecr get-login-password --region "${AWS_REGION}" \
+aws ecr get-login-password --region "${AWS_REGION}" --profile "${AWS_PROFILE}" \
   | docker login --username AWS --password-stdin "${REGISTRY}"
 
 echo ">> Ensure ECR repo exists: ${IMAGE_NAME}"
-aws ecr describe-repositories --repository-names "${IMAGE_NAME}" --region "${AWS_REGION}" >/dev/null 2>&1 \
-  || aws ecr create-repository --repository-name "${IMAGE_NAME}" --region "${AWS_REGION}" >/dev/null
+aws ecr describe-repositories --repository-names "${IMAGE_NAME}" --region "${AWS_REGION}" --profile "${AWS_PROFILE}" >/dev/null 2>&1 \
+  || aws ecr create-repository --repository-name "${IMAGE_NAME}" --region "${AWS_REGION}" --profile "${AWS_PROFILE}" >/dev/null
 
 echo ">> Build (${PLATFORM}) and push: ${IMAGE}"
 docker buildx build \
