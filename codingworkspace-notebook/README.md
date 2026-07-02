@@ -29,18 +29,42 @@ disabled).
 
 ## Building
 
-Built and pushed to ECR by the repo's `build.yml` Action when files under this
-directory change. The ECR repo is named `codingworkspace-notebook`; that name +
-the 7-char commit SHA tag is what `singleuser.image` points at in the z2jh
-`values.yaml`.
+### Local build + push (current path)
+
+While the CodingWorkspace source repo is private and no CI credential is
+configured, build and push manually with `build-and-push.sh`:
+
+```bash
+# 1. Push the branch/tag the Dockerfile references, so pip-from-git can fetch it.
+git -C /path/to/CodingWorkspace push origin jupyterhub-port
+
+# 2. Build for the cluster's arch and push to ECR (run from anywhere).
+ECR_ACCOUNT=123456789012 AWS_REGION=ca-central-1 \
+  jupyter-images/codingworkspace-notebook/build-and-push.sh
+```
+
+The script logs into ECR, creates the repo if needed, and runs a
+`docker buildx` build that injects the private-repo read token via a BuildKit
+secret (default token: `gh auth token`). It prints the `singleuser.image`
+values to set in the z2jh `values.yaml`. Override `IMAGE_TAG`, `CW_TOKEN`, or
+`PLATFORM` as needed — `PLATFORM` **must** match your EKS nodes (`linux/amd64`
+unless Graviton/arm64).
+
+### CI build (later)
+
+The repo's `build.yml` Action can build and push this image automatically when
+files here change, but it needs a Git credential for the private source repo
+(the default `GITHUB_TOKEN` can't read another repo). To enable it: add a
+read-only deploy key or fine-grained PAT as the `CODINGWORKSPACE_READ_TOKEN`
+secret in `ubc/jupyter-images`, then pass
+`--secret id=cw_token,env=CODINGWORKSPACE_READ_TOKEN` (with `DOCKER_BUILDKIT=1`)
+in the build step.
 
 ## Before it builds cleanly
 
 - **Pin the CodingWorkspace ref.** The `pip install ... @git+...@jupyterhub-port`
   line in the `Dockerfile` tracks the port branch; change it to a tag/SHA once
   merged.
-- **Repo access.** If `kevinlb1/CodingWorkspace` is private, add a Git credential
-  to the build Action (it currently has only AWS OIDC + ECR permissions).
 
 See `JUPYTERHUB_PORT_DESIGN.md` in the CodingWorkspace repo for the full design,
 the `values.yaml`, and the trial/acceptance plan.
