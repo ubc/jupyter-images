@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # codingworkspace-notebook
 #
 # Instructor-controlled agentic-coding UI (a frontend for opencode.ai) packaged
@@ -39,11 +40,15 @@ RUN /bin/bash -x /tmp/install-common.sh
 # --- jupyter-server-proxy + CodingWorkspace (NOT jupyter-ai / ACP agents) ---
 # CodingWorkspace is the controlled UI; OpenCode is the agent. We deliberately do
 # not install jupyter-ai or the npm ACP adapters that ai100-notebook uses.
+# CodingWorkspace is a PRIVATE repo, so the read token is injected via a BuildKit
+# secret mount (id=cw_token) and never written to an image layer. Supply it with
+# `docker build --secret id=cw_token,env=CW_TOKEN ...` locally, or via the Action.
 # TODO: pin @<tag-or-sha> once the jupyterhub-port branch is merged/tagged.
-# Add ",psycopg[binary]" style extra only if using Postgres (codingworkspace[postgres]).
-RUN pip install --no-cache-dir \
+# Add the [postgres] extra only if using Postgres (codingworkspace[postgres]).
+RUN --mount=type=secret,id=cw_token \
+    pip install --no-cache-dir \
         jupyter-server-proxy \
-        "codingworkspace @ git+https://github.com/kevinlb1/CodingWorkspace.git@jupyterhub-port"
+        "codingworkspace @ git+https://x-access-token:$(cat /run/secrets/cw_token)@github.com/kevinlb1/CodingWorkspace.git@jupyterhub-port"
 
 # Append the server-proxy + default_url config to the base image's config.
 # DO NOT overwrite /etc/jupyter/jupyter_server_config.py — that clobbers the hub config.
