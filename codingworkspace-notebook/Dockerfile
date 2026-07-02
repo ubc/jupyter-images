@@ -56,7 +56,10 @@ RUN /bin/bash -x /tmp/install-common.sh
 #   RUN --mount=type=secret,id=cw_token \
 #       pip install --no-cache-dir jupyter-server-proxy \
 #         "codingworkspace @ git+https://x-access-token:$(cat /run/secrets/cw_token)@github.com/kevinlb1/CodingWorkspace.git@<ref>"
-RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
+# `rw`: pip builds the local dir in-tree (writes codingworkspace.egg-info), so the
+# mount must be writable. BuildKit discards these writes — the host CW_SRC tree is
+# not modified.
+RUN --mount=type=bind,from=cwsrc,target=/cwsrc,rw \
     pip install --no-cache-dir jupyter-server-proxy /cwsrc
 
 # Append the server-proxy + default_url config to the base image's config.
