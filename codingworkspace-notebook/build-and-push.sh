@@ -4,21 +4,21 @@
 # This is the manual alternative to the repo's build.yml Action, used while the
 # CodingWorkspace source repo is private and no CI credential is configured.
 #
+# CodingWorkspace is installed from a LOCAL checkout (passed to buildx as the
+# `cwsrc` build context), so NO GitHub credential is needed and you build exactly
+# what is on disk (no need to push the branch first).
+#
 # Requirements on the machine you run this from:
 #   - Docker with buildx (standard in modern Docker Desktop / docker-ce)
 #   - AWS CLI configured with credentials that can push to ECR
-#   - Read access to github.com/kevinlb1/CodingWorkspace (for the token below)
-#
-# IMPORTANT: the Dockerfile installs CodingWorkspace via `pip install git+...@<ref>`,
-# which fetches from the REMOTE. Push the branch/tag referenced in the Dockerfile
-# to kevinlb1/CodingWorkspace BEFORE running this, or the build will 404.
+#   - A local checkout of kevinlb1/CodingWorkspace (see CW_SRC below)
 #
 # Usage:
 #   ECR_ACCOUNT=123456789012 AWS_REGION=ca-central-1 ./build-and-push.sh
 #
 # Optional overrides:
 #   IMAGE_TAG=trial          # image tag to push (default: trial)
-#   CW_TOKEN=ghp_xxx         # read token; default: $(gh auth token)
+#   CW_SRC=/path/to/CodingWorkspace   # default: ../CodingWorkspace next to this repo
 #   PLATFORM=linux/amd64     # target arch; MUST match your EKS nodes
 #   AWS_PROFILE=shared       # AWS CLI profile to use (default: shared)
 set -euo pipefail
@@ -30,24 +30,21 @@ PLATFORM="${PLATFORM:-linux/amd64}"
 AWS_PROFILE="${AWS_PROFILE:-shared}"
 IMAGE_NAME="codingworkspace-notebook"
 
-# Read token for the private CodingWorkspace repo. Default to the gh CLI login.
-if [ -z "${CW_TOKEN:-}" ]; then
-  if command -v gh >/dev/null 2>&1; then
-    CW_TOKEN="$(gh auth token)"
-  else
-    echo "Set CW_TOKEN (a GitHub token with read access to kevinlb1/CodingWorkspace)," >&2
-    echo "or install the gh CLI and run 'gh auth login'." >&2
-    exit 1
-  fi
-fi
-export CW_TOKEN
-
 REGISTRY="${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 # Build context is the jupyter-images repo root (parent of this script's dir).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Local CodingWorkspace checkout to install from. Default: sibling of this repo.
+CW_SRC="${CW_SRC:-${ROOT_DIR}/../CodingWorkspace}"
+if [ ! -f "${CW_SRC}/pyproject.toml" ]; then
+  echo "CodingWorkspace source not found at: ${CW_SRC}" >&2
+  echo "Set CW_SRC=/path/to/CodingWorkspace (a checkout containing pyproject.toml)." >&2
+  exit 1
+fi
+CW_SRC="$(cd "${CW_SRC}" && pwd)"
 
 echo ">> ECR login: ${REGISTRY}"
 aws ecr get-login-password --region "${AWS_REGION}" --profile "${AWS_PROFILE}" \
@@ -58,9 +55,10 @@ aws ecr describe-repositories --repository-names "${IMAGE_NAME}" --region "${AWS
   || aws ecr create-repository --repository-name "${IMAGE_NAME}" --region "${AWS_REGION}" --profile "${AWS_PROFILE}" >/dev/null
 
 echo ">> Build (${PLATFORM}) and push: ${IMAGE}"
+echo ">> CodingWorkspace source: ${CW_SRC}"
 docker buildx build \
   --platform "${PLATFORM}" \
-  --secret id=cw_token,env=CW_TOKEN \
+  --build-context "cwsrc=${CW_SRC}" \
   -f "${SCRIPT_DIR}/Dockerfile" \
   -t "${IMAGE}" \
   --push \

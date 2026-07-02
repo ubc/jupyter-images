@@ -45,15 +45,19 @@ RUN /bin/bash -x /tmp/install-common.sh
 # --- jupyter-server-proxy + CodingWorkspace (NOT jupyter-ai / ACP agents) ---
 # CodingWorkspace is the controlled UI; OpenCode is the agent. We deliberately do
 # not install jupyter-ai or the npm ACP adapters that ai100-notebook uses.
-# CodingWorkspace is a PRIVATE repo, so the read token is injected via a BuildKit
-# secret mount (id=cw_token) and never written to an image layer. Supply it with
-# `docker build --secret id=cw_token,env=CW_TOKEN ...` locally, or via the Action.
-# TODO: pin @<tag-or-sha> once the jupyterhub-port branch is merged/tagged.
-# Add the [postgres] extra only if using Postgres (codingworkspace[postgres]).
-RUN --mount=type=secret,id=cw_token \
-    pip install --no-cache-dir \
-        jupyter-server-proxy \
-        "codingworkspace @ git+https://x-access-token:$(cat /run/secrets/cw_token)@github.com/kevinlb1/CodingWorkspace.git@jupyterhub-port"
+#
+# Install CodingWorkspace from a LOCAL checkout passed as the `cwsrc` build
+# context (build-and-push.sh sets --build-context cwsrc=/path/to/CodingWorkspace).
+# This needs no GitHub credential and builds exactly what is on disk. Add the
+# [postgres] extra (pip install "/cwsrc[postgres]") only if using Postgres.
+#
+# CI alternative (source not on the build host): install from git instead, which
+# needs a read credential for the private repo (deploy key or collaborator token):
+#   RUN --mount=type=secret,id=cw_token \
+#       pip install --no-cache-dir jupyter-server-proxy \
+#         "codingworkspace @ git+https://x-access-token:$(cat /run/secrets/cw_token)@github.com/kevinlb1/CodingWorkspace.git@<ref>"
+RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
+    pip install --no-cache-dir jupyter-server-proxy /cwsrc
 
 # Append the server-proxy + default_url config to the base image's config.
 # DO NOT overwrite /etc/jupyter/jupyter_server_config.py — that clobbers the hub config.

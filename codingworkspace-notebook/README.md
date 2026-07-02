@@ -31,40 +31,34 @@ disabled).
 
 ### Local build + push (current path)
 
-While the CodingWorkspace source repo is private and no CI credential is
-configured, build and push manually with `build-and-push.sh`:
+CodingWorkspace is installed from a **local checkout** — no GitHub credential is
+needed, and you build exactly what is on disk (no branch push required):
 
 ```bash
-# 1. Push the branch/tag the Dockerfile references, so pip-from-git can fetch it.
-git -C /path/to/CodingWorkspace push origin jupyterhub-port
-
-# 2. Build for the cluster's arch and push to ECR (run from anywhere).
+# CW_SRC defaults to ../CodingWorkspace next to this repo; override if elsewhere.
 ECR_ACCOUNT=123456789012 AWS_REGION=ca-central-1 \
   jupyter-images/codingworkspace-notebook/build-and-push.sh
 ```
 
-The script logs into ECR, creates the repo if needed, and runs a
-`docker buildx` build that injects the private-repo read token via a BuildKit
-secret (default token: `gh auth token`). It prints the `singleuser.image`
-values to set in the z2jh `values.yaml`. Override `IMAGE_TAG`, `CW_TOKEN`, or
-`PLATFORM` as needed — `PLATFORM` **must** match your EKS nodes (`linux/amd64`
-unless Graviton/arm64).
+The script logs into ECR, creates the repo if needed, and runs a `docker buildx`
+build that installs CodingWorkspace from `CW_SRC` (passed as the `cwsrc` build
+context). It prints the `singleuser.image` values to set in the z2jh
+`values.yaml`. Override `IMAGE_TAG`, `CW_SRC`, `PLATFORM`, or `AWS_PROFILE` as
+needed — `PLATFORM` **must** match your EKS nodes (`linux/amd64` unless
+Graviton/arm64).
 
 ### CI build (later)
 
-The repo's `build.yml` Action can build and push this image automatically when
-files here change, but it needs a Git credential for the private source repo
-(the default `GITHUB_TOKEN` can't read another repo). To enable it: add a
-read-only deploy key or fine-grained PAT as the `CODINGWORKSPACE_READ_TOKEN`
-secret in `ubc/jupyter-images`, then pass
-`--secret id=cw_token,env=CODINGWORKSPACE_READ_TOKEN` (with `DOCKER_BUILDKIT=1`)
-in the build step.
-
-## Before it builds cleanly
-
-- **Pin the CodingWorkspace ref.** The `pip install ... @git+...@jupyterhub-port`
-  line in the `Dockerfile` tracks the port branch; change it to a tag/SHA once
-  merged.
+The repo's `build.yml` Action builds on the runner, which has no local checkout
+of the source, so CI must install CodingWorkspace **from git** — and that needs a
+read credential for the private repo (the default `GITHUB_TOKEN` can't read
+another repo). Options: a read-only **deploy key** on kevinlb1/CodingWorkspace,
+or a **collaborator token** (a classic PAT or `gh` token from an account kevinlb
+has granted read access — fine-grained PATs can't cross personal accounts). Then
+switch the Dockerfile's install line to the commented `git+https://...` form,
+add the token as the `CODINGWORKSPACE_READ_TOKEN` secret in `ubc/jupyter-images`,
+and pass `--secret id=cw_token,env=CODINGWORKSPACE_READ_TOKEN` (with
+`DOCKER_BUILDKIT=1`) in the build step.
 
 See `JUPYTERHUB_PORT_DESIGN.md` in the CodingWorkspace repo for the full design,
 the `values.yaml`, and the trial/acceptance plan.
