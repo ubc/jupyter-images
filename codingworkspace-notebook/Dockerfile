@@ -27,9 +27,14 @@ RUN apt-get update && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --- OpenCode agent binary (the thing CodingWorkspace is a frontend for) ---
-# Pin a version; COPY a vendored binary instead of curl|bash for reproducibility.
-RUN curl -fsSL https://opencode.ai/install | bash && \
-    install -m 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode
+# The installer installs into $HOME/.opencode; the base image sets
+# HOME=/home/jovyan, so install into a throwaway HOME and copy the binary out to
+# a system path on PATH (avoids polluting the student home).
+# (Pin a version / vendor the binary for reproducibility later.)
+RUN export HOME=/tmp/opencode-install && \
+    curl -fsSL https://opencode.ai/install | bash && \
+    install -m 0755 "${HOME}/.opencode/bin/opencode" /usr/local/bin/opencode && \
+    rm -rf /tmp/opencode-install
 
 # Shared jupyter-images tooling (nbgitpuller, etc.), run as the notebook user.
 COPY install-common.sh /tmp/install-common.sh
