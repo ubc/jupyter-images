@@ -17,6 +17,13 @@ activity/culling) out of the box. On top of that:
 - **OpenCode** is installed as the coding agent CodingWorkspace drives. This
   image deliberately does **not** install `jupyter-ai` or the ACP adapters used
   by `ai100-notebook`; the whole point is the controlled CodingWorkspace UI.
+- **LiteLLM wiring**: `/etc/opencode/opencode.json` (`OPENCODE_CONFIG`) defines
+  a `litellm` provider that resolves `OPENAI_BASE_URL` / `OPENAI_API_KEY` from
+  the pod env — the hub's AI100 `pre_spawn_hook` injects both (per-student
+  virtual key, default model `litellm/gpt-oss-20b`). This covers direct
+  `opencode` invocations; CodingWorkspace-driven turns construct their own
+  OpenCode env and per-workspace config, so pointing the CodingWorkspace UI at
+  LiteLLM is configured in CodingWorkspace itself, not here.
 - Each student's **preview app** is proxied by server-proxy at
   `/user/<name>/proxy/<port>/`, which carries websockets and streaming.
 - Per-student state (workspaces, repos, SQLite metadata, logs) lives under

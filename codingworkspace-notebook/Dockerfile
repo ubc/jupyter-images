@@ -74,6 +74,15 @@ USER root
 COPY codingworkspace-notebook/codingworkspace_server_proxy_config.py /tmp/cw_config.py
 RUN cat /tmp/cw_config.py >> /etc/jupyter/jupyter_server_config.py && rm /tmp/cw_config.py
 
+# OpenCode global config: routes direct `opencode` use to LiteLLM via the
+# OPENAI_BASE_URL / OPENAI_API_KEY env vars the hub injects at spawn. Lives
+# outside /home/jovyan because the per-user volume mount shadows the image home.
+# NOTE: CodingWorkspace-driven turns build their own minimal env + per-workspace
+# opencode.json (see workspaces.py / opencode_auth.py) and do NOT read this file;
+# pointing CodingWorkspace itself at LiteLLM is CodingWorkspace-side config.
+COPY codingworkspace-notebook/opencode.json /etc/opencode/opencode.json
+ENV OPENCODE_CONFIG=/etc/opencode/opencode.json
+
 USER ${NB_UID}
 ENV HOME=/home/jovyan
 WORKDIR $HOME
