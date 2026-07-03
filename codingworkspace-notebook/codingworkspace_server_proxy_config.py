@@ -33,7 +33,10 @@ c.ServerProxy.servers = {
     "codingworkspace": {
         "command": ["python", "-m", "codingworkspace.server", "serve"],
         "port": 8768,
-        "absolute_url": False,
+        # absolute_url=True: forward the full /user/<name>/codingworkspace/ path to
+        # the backend (do NOT strip the prefix), matching CODINGWORKSPACE_URL_PREFIX
+        # above. Same pattern as GizmoApp. With False, CW would receive "/" and 404.
+        "absolute_url": True,
         "timeout": 120,
         "environment": cw_env,
         "launcher_entry": {"enabled": False},   # no notebook launcher tile
