@@ -26,11 +26,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
 #   - the standalone CLI (for terminal use), and
 #   - the ACP adapter, which is how jupyter-ai v3 surfaces the agent as a chat
 #     persona (jupyter-ai's ACP *client* is pulled in by the pip step below).
+# OpenCode needs no separate adapter: ACP is built into the CLI (`opencode acp`).
 RUN npm install -g \
         @anthropic-ai/claude-code \
         @zed-industries/claude-agent-acp \
         @openai/codex \
-        @zed-industries/codex-acp
+        @zed-industries/codex-acp \
+        opencode-ai
 
 USER ${NB_UID}
 
@@ -68,6 +70,12 @@ COPY ai100-notebook/gizmoapp_server_proxy_config.py /tmp/gizmoapp_server_proxy_c
 RUN chmod 755 /usr/local/bin/start-gizmoapp.sh && \
     cat /tmp/gizmoapp_server_proxy_config.py >> /etc/jupyter/jupyter_server_config.py && \
     rm /tmp/gizmoapp_server_proxy_config.py
+
+# OpenCode config: routes it to LiteLLM via the OPENAI_BASE_URL / OPENAI_API_KEY
+# env vars the hub injects at spawn. Lives outside /home/jovyan because the
+# per-user volume mount shadows anything baked into the image home.
+COPY ai100-notebook/opencode.json /etc/opencode/opencode.json
+ENV OPENCODE_CONFIG=/etc/opencode/opencode.json
 
 # Fix ownership in case root touched files
 RUN chown -R jovyan:users /home/jovyan

@@ -8,6 +8,11 @@ Built on `quay.io/jupyter/scipy-notebook:hub-5.5.0` and adds:
   terminal CLI and an ACP adapter for jupyter-ai:
   - Claude Code — `@anthropic-ai/claude-code` (CLI) + `@zed-industries/claude-agent-acp` (ACP)
   - Codex — `@openai/codex` (CLI) + `@zed-industries/codex-acp` (ACP)
+  - OpenCode — `opencode-ai` (CLI; ACP is built in via `opencode acp`).
+    Pre-wired to the UBC LiteLLM proxy through `/etc/opencode/opencode.json`
+    (`OPENCODE_CONFIG`), which resolves `OPENAI_BASE_URL` / `OPENAI_API_KEY`
+    from the pod environment — the hub's AI100 `pre_spawn_hook` injects both.
+    Default model: `litellm/gpt-oss-20b`.
 - **jupyter-ai 3.x** (`>=3.0,<4.0`), plus `jupyter-ai-jupyternaut` and the
   `openai`/`anthropic` Python SDKs. jupyter-ai v3 connects to coding agents over
   the Agent Client Protocol (ACP); it pulls in `jupyter-ai-acp-client`
