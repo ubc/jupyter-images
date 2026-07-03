@@ -17,6 +17,9 @@ cw_env = {
     "CODINGWORKSPACE_ISOLATION_MODE": "logical",       # the pod is the sandbox
     "CODINGWORKSPACE_REMOTE_WORKERS_ENABLED": "0",     # turns run locally, in this pod
     "CODINGWORKSPACE_AGENT_BACKEND": "opencode",
+    # Clone the (public) starter over HTTPS: the pod has no SSH key/known_hosts,
+    # so the default git@github.com: SSH URL fails host-key verification (exit 128).
+    "CODINGWORKSPACE_STARTER_REPO_URL": "https://github.com/kevinlb1/GizmoApp.git",
     "CODINGWORKSPACE_BIND_HOST": "127.0.0.1",          # only server-proxy (same pod) reaches it
     "CODINGWORKSPACE_PLATFORM_PORT": "8768",
     "CODINGWORKSPACE_URL_PREFIX": "{base_url}codingworkspace",
