@@ -17,7 +17,7 @@
 #   ECR_ACCOUNT=123456789012 AWS_REGION=ca-central-1 ./build-and-push.sh
 #
 # Optional overrides:
-#   IMAGE_TAG=trial          # image tag to push (default: trial)
+#   IMAGE_TAG=<tag>          # default: <jupyter-images sha>-cw<codingworkspace sha>[.dirty]
 #   CW_SRC=/path/to/CodingWorkspace   # default: ../CodingWorkspace next to this repo
 #   PLATFORM=linux/amd64     # target arch; MUST match your EKS nodes
 #   AWS_PROFILE=shared       # AWS CLI profile to use (default: shared)
@@ -25,13 +25,9 @@ set -euo pipefail
 
 : "${ECR_ACCOUNT:?set ECR_ACCOUNT to your AWS account id}"
 : "${AWS_REGION:?set AWS_REGION, e.g. ca-central-1}"
-IMAGE_TAG="${IMAGE_TAG:-trial}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 AWS_PROFILE="${AWS_PROFILE:-shared}"
 IMAGE_NAME="codingworkspace-notebook"
-
-REGISTRY="${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 # Build context is the jupyter-images repo root (parent of this script's dir).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,6 +41,24 @@ if [ ! -f "${CW_SRC}/pyproject.toml" ]; then
   exit 1
 fi
 CW_SRC="$(cd "${CW_SRC}" && pwd)"
+
+# Image tag: default to <jupyter-images sha>-cw<codingworkspace sha>[.dirty] so each
+# build is uniquely identified by the exact state of BOTH inputs (the image config in
+# this repo AND the app source in CW_SRC). Override IMAGE_TAG to pin a release.
+if [ -z "${IMAGE_TAG:-}" ]; then
+  ji_sha="$(git -C "${SCRIPT_DIR}" rev-parse --short=7 HEAD 2>/dev/null || echo nogit)"
+  cw_sha="$(git -C "${CW_SRC}" rev-parse --short=7 HEAD 2>/dev/null || echo nogit)"
+  # Dirty only for modified TRACKED files (ignore untracked cruft like .DS_Store).
+  dirty=""
+  if ! git -C "${SCRIPT_DIR}" diff --quiet HEAD 2>/dev/null \
+     || ! git -C "${CW_SRC}" diff --quiet HEAD 2>/dev/null; then
+    dirty=".dirty"
+  fi
+  IMAGE_TAG="${ji_sha}-cw${cw_sha}${dirty}"
+fi
+
+REGISTRY="${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 echo ">> ECR login: ${REGISTRY}"
 aws ecr get-login-password --region "${AWS_REGION}" --profile "${AWS_PROFILE}" \
