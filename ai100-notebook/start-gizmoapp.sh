@@ -19,6 +19,11 @@ fi
 
 cd "${APP_DIR}"
 
+# The student's app gets its own AI identity (GIZMO_LLM_*). Drop the coding
+# agent's credentials so a bare OpenAI() in app code fails loudly instead of
+# silently spending the agent's budget.
+unset OPENAI_API_KEY OPENAI_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL COHERE_API_KEY
+
 # server.wsgi calls create_app(), which runs the (idempotent) DB migrations on
 # import, so no separate init step is needed. --chdir keeps the `server`
 # package importable for gunicorn.
