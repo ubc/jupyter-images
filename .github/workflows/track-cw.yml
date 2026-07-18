@@ -1,0 +1,83 @@
+name: Track CodingWorkspace release
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *" # every 15 min, offset from top-of-hour congestion
+  workflow_dispatch:
+
+# Auto-bumps codingworkspace-notebook/CW_REF (on the image branch below) to the
+# head of the CodingWorkspace `release` branch, then dispatches build.yml.
+# Merging to `release` in the CodingWorkspace repo is therefore the "deploy to
+# preview" action: the resulting image is pushed as an immutable
+# <ji sha>-cw<cw sha> tag plus the moving :preview tag the preview hub follows.
+# Prod deployments instead pin an immutable tag in jhub-config (the gate).
+#
+# Two GitHub quirks explain the shape of this file:
+# - Scheduled workflows only run from the DEFAULT branch, which is why this
+#   file lives on main while the image sources live on the image branch.
+# - Pushes made with GITHUB_TOKEN never trigger `push` workflows (recursion
+#   guard), so the bump commit alone would not build; we dispatch build.yml
+#   explicitly (workflow_dispatch is exempt from the guard).
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: track-cw
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    env:
+      JI_BRANCH: codingworkspace-notebook
+      CW_REPO: git@github.com:kevinlb1/CodingWorkspace.git
+      CW_BRANCH: release
+      CW_REF_FILE: codingworkspace-notebook/CW_REF
+    steps:
+      - name: Checkout image branch
+        uses: actions/checkout@v4
+        with:
+          ref: codingworkspace-notebook
+
+      - name: Resolve CodingWorkspace release head
+        id: cw
+        env:
+          CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
+        run: |
+          keyfile="$RUNNER_TEMP/cw_key"
+          printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
+          chmod 600 "$keyfile"
+          head=$(GIT_SSH_COMMAND="ssh -i $keyfile -o StrictHostKeyChecking=accept-new" \
+            git ls-remote "$CW_REPO" "refs/heads/$CW_BRANCH" | cut -f1)
+          rm -f "$keyfile"
+          if [ -z "$head" ]; then
+            echo "No $CW_BRANCH branch on the CodingWorkspace remote; nothing to track."
+          fi
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+
+      - name: Bump CW_REF and dispatch the build
+        if: steps.cw.outputs.head != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_REF: ${{ steps.cw.outputs.head }}
+        run: |
+          current=$(grep -Ev '^[[:space:]]*(#|$)' "$CW_REF_FILE" | head -n1 | tr -d '[:space:]')
+          if [ "$current" = "$NEW_REF" ]; then
+            echo "CW_REF already at $NEW_REF; nothing to do."
+            exit 0
+          fi
+          sed -i "s|^${current}\$|${NEW_REF}|" "$CW_REF_FILE"
+          # Fail loudly if the swap missed (e.g. CW_REF hand-edited to an
+          # unexpected shape) rather than committing a no-op.
+          grep -q "^${NEW_REF}\$" "$CW_REF_FILE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$CW_REF_FILE"
+          git commit -m "auto: track CodingWorkspace $CW_BRANCH @ ${NEW_REF:0:7}"
+          # If a human pushed the image branch meanwhile, this fails and the
+          # next scheduled run retries from scratch - no force, no rebase.
+          git push origin "HEAD:$JI_BRANCH"
+          gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref "$JI_BRANCH"
+          echo "Bumped ${current:0:7} -> ${NEW_REF:0:7}; dispatched build.yml on $JI_BRANCH."
