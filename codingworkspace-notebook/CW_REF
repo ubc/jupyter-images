@@ -2,8 +2,10 @@
 # The workflow checks out kevinlb1/CodingWorkspace at this ref (read-only
 # CW_DEPLOY_KEY deploy key) and passes it to the build as the `cwsrc` context.
 #
-# Prefer a full commit SHA so builds are reproducible; a branch name also works.
-# Bumping this file IS the release action: the change triggers a rebuild of
-# codingworkspace-notebook with the new CodingWorkspace source, tagged
-# <jupyter-images sha>-cw<codingworkspace sha>.
+# NORMALLY MAINTAINED BY AUTOMATION: track-cw.yml (on main) follows the
+# CodingWorkspace `release` branch and bumps this pin — releasing is merging
+# to `release`, not editing this file. A manual bump still triggers a build
+# (tagged <jupyter-images sha>-cw<codingworkspace sha>), but pause track-cw
+# first or it re-bumps within 15 minutes. Full SHAs only, for reproducibility.
+# Runbook: PIPELINE.md.
 209fbcbdcf87c70e1fd8b812118b2b32fc71f8db

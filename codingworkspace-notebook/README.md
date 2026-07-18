@@ -44,22 +44,26 @@ The repo's `build.yml` Action builds and pushes this image even though the
 CodingWorkspace source repo (kevinlb1/CodingWorkspace) is private:
 
 - **`CW_REF`** (in this directory) pins the CodingWorkspace ref to build —
-  prefer a full commit SHA so builds are reproducible. **Bumping it is the
-  release action**: the change triggers the Action, which rebuilds this image
-  with the new source.
+  a full commit SHA, normally maintained by the `track-cw.yml` workflow (on
+  `main`), which follows the CodingWorkspace **`release`** branch, bumps this
+  file, and dispatches the build. **Merging to `release` is therefore the
+  release action.** Bumping `CW_REF` by hand still works, but pause the
+  tracker first or it re-bumps within 15 minutes.
 - The workflow clones the private repo at that ref using the read-only
   **`CW_DEPLOY_KEY`** Actions secret (a deploy key on the CodingWorkspace
   repo), into `RUNNER_TEMP` so it stays out of the other images' build
   contexts, and passes it to the build as the `cwsrc` named context the
   Dockerfile expects.
-- The pushed tag is `<jupyter-images sha>-cw<codingworkspace sha>` — set that
-  as `singleuser.image.tag` in the z2jh values. (`latest` is also pushed, but
-  pin the full tag.)
+- The pushed tags are the immutable `<jupyter-images sha>-cw<codingworkspace
+  sha>` plus a moving **`:preview`** tag. The preview hub's profile follows
+  `:preview` with `image_pull_policy: Always` (new spawns pick up new builds,
+  no hub deploy); prod must pin the immutable tag in the z2jh values.
 - When the secret is unavailable (e.g. pull requests from forks) the image is
   skipped, not failed, so unrelated PRs stay green.
 
-So a release is: edit `CW_REF` (and/or files here), commit, push, wait for the
-Action, then point the hub values at the printed tag.
+Full mechanics, credentials, runbook (rollback, pausing the tracker, prod
+promotion): **[PIPELINE.md](PIPELINE.md)**. The developer-facing release
+guide lives in the CodingWorkspace repo as `RELEASING.md`.
 
 ### Local build + push (fallback)
 
