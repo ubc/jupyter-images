@@ -6,4 +6,4 @@
 # Bumping this file IS the release action: the change triggers a rebuild of
 # codingworkspace-notebook with the new CodingWorkspace source, tagged
 # <jupyter-images sha>-cw<codingworkspace sha>.
-209fbcbdcf87c70e1fd8b812118b2b32fc71f8db
+1ca2a98fd31d585bce261545e230a11f262cf371
