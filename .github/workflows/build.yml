@@ -36,6 +36,9 @@ jobs:
         env:
           AWS_REGION: ${{ vars.AWS_REGION }}
           ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          # Read-only deploy key for kevinlb1/CodingWorkspace (private), used
+          # only by the codingworkspace-notebook build. Absent on fork PRs.
+          CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
         run: |
           # Determine the base commit for the changed-files diff.
           # github.event.before is the null SHA on a new branch's first push
@@ -91,7 +94,43 @@ jobs:
 
               # Build and push image
               TAG="${GITHUB_SHA::7}"
-              docker build -f "$dir/Dockerfile" -t "$ECR_REPO:$TAG" .
+              EXTRA_BUILD_ARGS=()
+
+              # codingworkspace-notebook installs CodingWorkspace from source,
+              # and that repo (kevinlb1/CodingWorkspace) is private: clone it
+              # with the read-only CW_DEPLOY_KEY deploy key at the ref pinned
+              # in codingworkspace-notebook/CW_REF, and hand it to the build as
+              # the `cwsrc` named context the image's Dockerfile expects. The
+              # clone lives in RUNNER_TEMP so it never leaks into the default
+              # build context of the other images. Skipped (not failed) when
+              # the secret is unavailable, e.g. on pull requests from forks.
+              if [ "$dir" = "codingworkspace-notebook" ]; then
+                if [ -z "${CW_DEPLOY_KEY:-}" ]; then
+                  echo "CW_DEPLOY_KEY secret unavailable (fork PR?); skipping $dir."
+                  continue
+                fi
+                CW_REF=$(grep -Ev '^[[:space:]]*(#|$)' "$dir/CW_REF" | head -n1 | tr -d '[:space:]')
+                if [ -z "$CW_REF" ]; then
+                  echo "ERROR: $dir/CW_REF contains no ref." >&2
+                  exit 1
+                fi
+                echo "Cloning CodingWorkspace at pinned ref: $CW_REF"
+                keyfile="$RUNNER_TEMP/cw_deploy_key"
+                printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
+                chmod 600 "$keyfile"
+                rm -rf "$RUNNER_TEMP/cw-src"
+                GIT_SSH_COMMAND="ssh -i $keyfile -o StrictHostKeyChecking=accept-new" \
+                  git clone --quiet git@github.com:kevinlb1/CodingWorkspace.git "$RUNNER_TEMP/cw-src"
+                rm -f "$keyfile"
+                # A SHA resolves directly; a branch name needs the origin/ prefix.
+                git -C "$RUNNER_TEMP/cw-src" checkout --quiet --detach "$CW_REF" 2>/dev/null \
+                  || git -C "$RUNNER_TEMP/cw-src" checkout --quiet --detach "origin/$CW_REF"
+                CW_SHA=$(git -C "$RUNNER_TEMP/cw-src" rev-parse --short=7 HEAD)
+                TAG="${TAG}-cw${CW_SHA}"
+                EXTRA_BUILD_ARGS+=(--build-context "cwsrc=$RUNNER_TEMP/cw-src")
+              fi
+
+              docker buildx build --load "${EXTRA_BUILD_ARGS[@]}" -f "$dir/Dockerfile" -t "$ECR_REPO:$TAG" .
               docker push "$ECR_REPO:$TAG"
               docker tag "$ECR_REPO:$TAG" "$ECR_REPO:latest"
               docker push "$ECR_REPO:latest"

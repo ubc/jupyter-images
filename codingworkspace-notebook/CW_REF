@@ -1,0 +1,9 @@
+# CodingWorkspace source ref for the CI image build (.github/workflows/build.yml).
+# The workflow checks out kevinlb1/CodingWorkspace at this ref (read-only
+# CW_DEPLOY_KEY deploy key) and passes it to the build as the `cwsrc` context.
+#
+# Prefer a full commit SHA so builds are reproducible; a branch name also works.
+# Bumping this file IS the release action: the change triggers a rebuild of
+# codingworkspace-notebook with the new CodingWorkspace source, tagged
+# <jupyter-images sha>-cw<codingworkspace sha>.
+1ca2a98fd31d585bce261545e230a11f262cf371
