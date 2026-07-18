@@ -20,10 +20,12 @@ activity/culling) out of the box. On top of that:
 - **LiteLLM wiring**: `/etc/opencode/opencode.json` (`OPENCODE_CONFIG`) defines
   a `litellm` provider that resolves `OPENAI_BASE_URL` / `OPENAI_API_KEY` from
   the pod env — the hub's AI100 `pre_spawn_hook` injects both (per-student
-  virtual key, default model `litellm/gpt-oss-20b`). This covers direct
-  `opencode` invocations; CodingWorkspace-driven turns construct their own
-  OpenCode env and per-workspace config, so pointing the CodingWorkspace UI at
-  LiteLLM is configured in CodingWorkspace itself, not here.
+  virtual key). The model list and default (`litellm/gpt-5.4-mini`) must be
+  kept in sync with the models the AI100 LiteLLM team actually serves, or
+  direct `opencode` use 403s. This covers direct `opencode` invocations;
+  CodingWorkspace-driven turns construct their own OpenCode env and
+  per-workspace config, so pointing the CodingWorkspace UI at LiteLLM is
+  configured in CodingWorkspace itself, not here.
 - Each student's **preview app** is proxied by server-proxy at
   `/user/<name>/proxy/<port>/`, which carries websockets and streaming.
 - Per-student state (workspaces, repos, SQLite metadata, logs) lives under
@@ -36,10 +38,34 @@ disabled).
 
 ## Building
 
-### Local build + push (current path)
+### CI build (the normal path)
 
-CodingWorkspace is installed from a **local checkout** — no GitHub credential is
-needed, and you build exactly what is on disk (no branch push required):
+The repo's `build.yml` Action builds and pushes this image even though the
+CodingWorkspace source repo (kevinlb1/CodingWorkspace) is private:
+
+- **`CW_REF`** (in this directory) pins the CodingWorkspace ref to build —
+  prefer a full commit SHA so builds are reproducible. **Bumping it is the
+  release action**: the change triggers the Action, which rebuilds this image
+  with the new source.
+- The workflow clones the private repo at that ref using the read-only
+  **`CW_DEPLOY_KEY`** Actions secret (a deploy key on the CodingWorkspace
+  repo), into `RUNNER_TEMP` so it stays out of the other images' build
+  contexts, and passes it to the build as the `cwsrc` named context the
+  Dockerfile expects.
+- The pushed tag is `<jupyter-images sha>-cw<codingworkspace sha>` — set that
+  as `singleuser.image.tag` in the z2jh values. (`latest` is also pushed, but
+  pin the full tag.)
+- When the secret is unavailable (e.g. pull requests from forks) the image is
+  skipped, not failed, so unrelated PRs stay green.
+
+So a release is: edit `CW_REF` (and/or files here), commit, push, wait for the
+Action, then point the hub values at the printed tag.
+
+### Local build + push (fallback)
+
+`build-and-push.sh` builds from a **local checkout** — useful for testing
+uncommitted CodingWorkspace changes, since no GitHub credential is needed and
+you build exactly what is on disk:
 
 ```bash
 # CW_SRC defaults to ../CodingWorkspace next to this repo; override if elsewhere.
@@ -52,20 +78,8 @@ build that installs CodingWorkspace from `CW_SRC` (passed as the `cwsrc` build
 context). It prints the `singleuser.image` values to set in the z2jh
 `values.yaml`. Override `IMAGE_TAG`, `CW_SRC`, `PLATFORM`, or `AWS_PROFILE` as
 needed — `PLATFORM` **must** match your EKS nodes (`linux/amd64` unless
-Graviton/arm64).
-
-### CI build (later)
-
-The repo's `build.yml` Action builds on the runner, which has no local checkout
-of the source, so CI must install CodingWorkspace **from git** — and that needs a
-read credential for the private repo (the default `GITHUB_TOKEN` can't read
-another repo). Options: a read-only **deploy key** on kevinlb1/CodingWorkspace,
-or a **collaborator token** (a classic PAT or `gh` token from an account kevinlb
-has granted read access — fine-grained PATs can't cross personal accounts). Then
-switch the Dockerfile's install line to the commented `git+https://...` form,
-add the token as the `CODINGWORKSPACE_READ_TOKEN` secret in `ubc/jupyter-images`,
-and pass `--secret id=cw_token,env=CODINGWORKSPACE_READ_TOKEN` (with
-`DOCKER_BUILDKIT=1`) in the build step.
+Graviton/arm64). Local builds tag `<sha>-cw<sha>.dirty` when either tree has
+uncommitted changes — don't deploy `.dirty` tags.
 
 See `JUPYTERHUB_PORT_DESIGN.md` in the CodingWorkspace repo for the full design,
 the `values.yaml`, and the trial/acceptance plan.

@@ -46,16 +46,12 @@ RUN /bin/bash -x /tmp/install-common.sh
 # CodingWorkspace is the controlled UI; OpenCode is the agent. We deliberately do
 # not install jupyter-ai or the npm ACP adapters that ai100-notebook uses.
 #
-# Install CodingWorkspace from a LOCAL checkout passed as the `cwsrc` build
-# context (build-and-push.sh sets --build-context cwsrc=/path/to/CodingWorkspace).
-# This needs no GitHub credential and builds exactly what is on disk. Add the
-# [postgres] extra (pip install "/cwsrc[postgres]") only if using Postgres.
-#
-# CI alternative (source not on the build host): install from git instead, which
-# needs a read credential for the private repo (deploy key or collaborator token):
-#   RUN --mount=type=secret,id=cw_token \
-#       pip install --no-cache-dir jupyter-server-proxy \
-#         "codingworkspace @ git+https://x-access-token:$(cat /run/secrets/cw_token)@github.com/kevinlb1/CodingWorkspace.git@<ref>"
+# Install CodingWorkspace from the `cwsrc` named build context. Both build
+# paths provide it: build.yml clones the private repo at the CW_REF-pinned ref
+# (read-only CW_DEPLOY_KEY deploy key) and passes the clone; build-and-push.sh
+# passes a local checkout (--build-context cwsrc=/path/to/CodingWorkspace).
+# Add the [postgres] extra (pip install "/cwsrc[postgres]") only if using
+# Postgres.
 # pip builds a local dir in-tree (writes codingworkspace.egg-info), and this step
 # runs as NB_USER, who does not own the bind-mounted source. So copy the source
 # (minus heavy/dev dirs) into an NB_USER-owned temp dir, install from there, and
