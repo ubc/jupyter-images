@@ -12,7 +12,6 @@
 ARG BASE_CONTAINER=quay.io/jupyter/base-notebook:hub-5.5.0
 FROM $BASE_CONTAINER
 
-LABEL maintainer="Jeff Longland <jeff.longland@ubc.ca>"
 LABEL course="AI100"
 
 USER root
