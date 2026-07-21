@@ -137,9 +137,9 @@ jobs:
 
               # Moving :preview tag for the preview hub, whose profile pulls
               # with image_pull_policy Always - new spawns pick up new builds
-              # without a hub deploy. Only refreshed from the canonical image
-              # branch; prod pins immutable <ji>-cw<cw> tags in jhub-config.
-              if [ "$dir" = "codingworkspace-notebook" ] && [ "$GITHUB_REF_NAME" = "codingworkspace-notebook" ]; then
+              # without a hub deploy. Only refreshed from main; prod pins
+              # immutable <ji>-cw<cw> tags in jhub-config.
+              if [ "$dir" = "codingworkspace-notebook" ] && [ "$GITHUB_REF_NAME" = "main" ]; then
                 docker tag "$ECR_REPO:$TAG" "$ECR_REPO:preview"
                 docker push "$ECR_REPO:preview"
               fi

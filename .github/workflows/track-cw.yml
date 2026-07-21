@@ -5,16 +5,16 @@ on:
     - cron: "7,22,37,52 * * * *" # every 15 min, offset from top-of-hour congestion
   workflow_dispatch:
 
-# Auto-bumps codingworkspace-notebook/CW_REF (on the image branch below) to the
-# head of the CodingWorkspace `release` branch, then dispatches build.yml.
-# Merging to `release` in the CodingWorkspace repo is therefore the "deploy to
-# preview" action: the resulting image is pushed as an immutable
-# <ji sha>-cw<cw sha> tag plus the moving :preview tag the preview hub follows.
-# Prod deployments instead pin an immutable tag in jhub-config (the gate).
+# Auto-bumps codingworkspace-notebook/CW_REF (on main) to the head of the
+# CodingWorkspace `release` branch, then dispatches build.yml. Merging to
+# `release` in the CodingWorkspace repo is therefore the "deploy to preview"
+# action: the resulting image is pushed as an immutable <ji sha>-cw<cw sha>
+# tag plus the moving :preview tag the preview hub follows. Prod deployments
+# instead pin an immutable tag in jhub-config (the gate).
 #
-# Two GitHub quirks explain the shape of this file:
-# - Scheduled workflows only run from the DEFAULT branch, which is why this
-#   file lives on main while the image sources live on the image branch.
+# Two GitHub quirks shape this file:
+# - Scheduled workflows only run from the DEFAULT branch (main), which is where
+#   this file and the image sources both live.
 # - Pushes made with GITHUB_TOKEN never trigger `push` workflows (recursion
 #   guard), so the bump commit alone would not build; we dispatch build.yml
 #   explicitly (workflow_dispatch is exempt from the guard).
@@ -31,15 +31,15 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     env:
-      JI_BRANCH: codingworkspace-notebook
+      JI_BRANCH: main
       CW_REPO: git@github.com:kevinlb1/CodingWorkspace.git
       CW_BRANCH: release
       CW_REF_FILE: codingworkspace-notebook/CW_REF
     steps:
-      - name: Checkout image branch
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
-          ref: codingworkspace-notebook
+          ref: main
 
       - name: Resolve CodingWorkspace release head
         id: cw
@@ -76,8 +76,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$CW_REF_FILE"
           git commit -m "auto: track CodingWorkspace $CW_BRANCH @ ${NEW_REF:0:7}"
-          # If a human pushed the image branch meanwhile, this fails and the
-          # next scheduled run retries from scratch - no force, no rebase.
+          # If a human pushed main meanwhile, this fails and the next scheduled
+          # run retries from scratch - no force, no rebase.
           git push origin "HEAD:$JI_BRANCH"
           gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref "$JI_BRANCH"
           echo "Bumped ${current:0:7} -> ${NEW_REF:0:7}; dispatched build.yml on $JI_BRANCH."

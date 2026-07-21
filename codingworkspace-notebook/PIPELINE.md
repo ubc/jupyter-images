@@ -12,7 +12,7 @@ kevinlb1/CodingWorkspace                ubc/jupyter-images                      
 push/merge to `release`  ──(≤15 min)──▶ track-cw.yml (cron, on main)
                                           │ ls-remote release via CW_DEPLOY_KEY
                                           │ bump codingworkspace-notebook/CW_REF
-                                          │   (bot commit on image branch)
+                                          │   (bot commit on main)
                                           └─▶ dispatch build.yml ────────────────▶ push <ji7>-cw<cw7>
                                                 │ clone CW at CW_REF (deploy key)          + :latest
                                                 │ build with cwsrc context                 + :preview
@@ -25,16 +25,16 @@ prod hub profile:    immutable <ji7>-cw<cw7> pin, changed via jhub-config PR + h
 
 | Piece | Where | Notes |
 |-------|-------|-------|
-| `track-cw.yml` | `.github/workflows/`, **`main` branch** | Cron `7,22,37,52 * * * *` + `workflow_dispatch`. Must live on the default branch: GitHub only runs scheduled workflows from there. Checks out and commits to the image branch (`JI_BRANCH` env, currently `codingworkspace-notebook`) |
-| `build.yml` | `.github/workflows/`, image branch | Unchanged multi-image build, plus: clones the private CW repo at `CW_REF` into `$RUNNER_TEMP/cw-src` (kept out of the other images' build contexts) and passes it as the `cwsrc` named context; pushes the moving `:preview` tag for this image, canonical branch only; **skips (not fails)** this image when the secret is unavailable (fork PRs) |
-| `CW_REF` | `codingworkspace-notebook/`, image branch | Pin file, full CW commit SHA. Owned by the tracker; manual edits get overwritten within 15 min unless the tracker is paused |
+| `track-cw.yml` | `.github/workflows/`, on `main` | Cron `7,22,37,52 * * * *` + `workflow_dispatch`. Must live on the default branch: GitHub only runs scheduled workflows from there. Checks out and commits to `main` (`JI_BRANCH` env) |
+| `build.yml` | `.github/workflows/`, on `main` | Unchanged multi-image build, plus: clones the private CW repo at `CW_REF` into `$RUNNER_TEMP/cw-src` (kept out of the other images' build contexts) and passes it as the `cwsrc` named context; pushes the moving `:preview` tag for this image, `main` only; **skips (not fails)** this image when the secret is unavailable (fork PRs) |
+| `CW_REF` | `codingworkspace-notebook/`, on `main` | Pin file, full CW commit SHA. Owned by the tracker; manual edits get overwritten within 15 min unless the tracker is paused |
 | Preview hub values | `jhub-config/config-preview-keycloak.yaml` | `ai100-codingworkspace` profile: `image: …:preview`, `image_pull_policy: Always` |
 | Prod hub values | `jhub-config/config-prd-keycloak.yaml` | Must pin an immutable `<ji7>-cw<cw7>` tag. Never point prod at `:preview` or `:latest` |
 
 Two GitHub quirks explain the workflow shape:
 
-1. **Scheduled workflows run only from the default branch** — hence
-   `track-cw.yml` on `main` while the image sources live on the image branch.
+1. **Scheduled workflows run only from the default branch** — so `track-cw.yml`
+   runs from `main`, which is also where the image sources live.
 2. **Pushes made with `GITHUB_TOKEN` never trigger `push` workflows**
    (recursion guard). The tracker's bump commit alone would build nothing, so
    it explicitly dispatches `build.yml` (`workflow_dispatch` is exempt from
@@ -122,18 +122,18 @@ cycle re-tags `:preview` forward again. The clean rollback is a revert on
 | Symptom | Cause / action |
 |---------|----------------|
 | Tracker run green but says "No release branch" | `release` deleted/renamed in the CW repo — recreate or update `CW_BRANCH` |
-| Tracker push step fails | Race with a human push to the image branch; by design it does not rebase/force — the next cron run retries cleanly |
+| Tracker push step fails | Race with a human push to `main`; by design it does not rebase/force — the next cron run retries cleanly |
 | Build red at the clone step | Deploy key removed/rotated on the CW repo, or secret missing — re-add key / secret |
 | Build red at `pip install` | The CW commit broke packaging; fix forward or revert on `release` |
-| Build green but `:preview` not updated | Build ran from a non-canonical branch (the retag is branch-gated) or for another image only — check the run's "Detected changes" lines |
+| Build green but `:preview` not updated | Build ran from a non-`main` branch (the retag is gated to `main`) or for another image only — check the run's "Detected changes" lines |
 | Students report old behavior | Their pod predates the release — server stop/start required; pods are never hot-swapped |
 | Fork PR shows the image skipped | Expected: secrets aren't available to fork PRs; the image is skipped so the PR stays green |
 
 ## Maintenance notes
 
-- When the `codingworkspace-notebook` branch merges into `main`, update
-  `JI_BRANCH` in `track-cw.yml` (and the retag branch-gate in `build.yml`)
-  to `main`.
+- The pipeline operates entirely on `main` (the `codingworkspace-notebook`
+  feature branch was merged and retired). `JI_BRANCH`, the `track-cw.yml`
+  checkout, and the `build.yml` `:preview` retag gate are all `main`.
 - Optional upgrades, deliberately not built yet: `repository_dispatch` from
   CW pushes for instant tracking (needs a dispatch credential in the CW
   repo; cron remains the fallback), and a re-pull DaemonSet if the
