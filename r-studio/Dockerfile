@@ -1,11 +1,11 @@
 # Soci 428 — RStudio Server image for JupyterHub (Z2JH)
 # Base: rocker/tidyverse pins R version + tidyverse + RStudio Server
-FROM rocker/tidyverse:4.4.2
+FROM rocker/tidyverse:4.6.1
 
 # ---- System dependencies for JupyterHub integration ----
 # We need Python + pip to install jupyterhub-singleuser and jupyter-rsession-proxy,
 # which is the bridge that lets JupyterHub spawn and proxy to RStudio Server.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         python3-venv \
@@ -17,14 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---- JupyterHub plumbing ----
 # jupyterhub-singleuser is what Z2JH's KubeSpawner actually launches.
 # jupyter-rsession-proxy is the extension that proxies RStudio through it.
-# Pinning versions keeps the image reproducible across rebuilds.
+# Pinning versions to match the Hub (5.5.0) keeps the image reproducible across rebuilds.
 # Using --break-system-packages because Debian 12 marks /usr as externally managed;
 # acceptable here since the container is single-purpose.
 RUN pip3 install --break-system-packages --no-cache-dir \
-        jupyterhub==5.2.1 \
-        jupyter-server==2.14.2 \
-        jupyter-rsession-proxy==2.3.0 \
-        notebook==7.2.2
+        jupyterhub==5.5.0 \
+        jupyter-server==2.19.0 \
+        jupyter-rsession-proxy==2.4.0 \
+        notebook==7.5.7
 
 # ---- Enable GitHub Copilot in RStudio Server ----
 # This is the admin-side toggle. Each student still authenticates their own

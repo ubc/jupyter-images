@@ -6,6 +6,7 @@ LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>"
 USER root
 
 RUN apt-get update && \
+    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
     curl \
     wget \
