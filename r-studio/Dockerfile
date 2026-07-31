@@ -72,6 +72,13 @@ RUN mkdir -p /home/jovyan \
     && rm -rf /home/rstudio \
     && ln -s /home/jovyan /home/rstudio
 
+# ---- Fix RStudio Server state-directory ownership for non-root launch ----
+# rocker/tidyverse creates these owned by the 'rstudio-server' system account,
+# for its normal root-launched/s6-supervised startup path. jupyter-rsession-proxy
+# instead launches rserver directly as the singleuser process (uid 1000, user
+# 'rstudio'), which needs write access to its own state DB and session key.
+RUN chown -R rstudio:rstudio /var/lib/rstudio-server /var/run/rstudio-server
+
 # ---- Persistent user package library ----
 # Rocker installs packages to /usr/local, which is NOT persisted across sessions.
 # This creates a user-writable library inside the persistent home volume so
