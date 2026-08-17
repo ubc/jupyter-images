@@ -24,6 +24,7 @@ RUN pip3 install --break-system-packages --no-cache-dir \
         jupyterhub==5.5.0 \
         jupyter-server==2.19.0 \
         jupyter-rsession-proxy==2.4.0 \
+        nbgitpuller==1.3.0 \
         notebook==7.5.7
 
 # ---- Enable GitHub Copilot in RStudio Server ----
