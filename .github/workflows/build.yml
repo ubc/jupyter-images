@@ -53,11 +53,12 @@ jobs:
           if [ -z "$BEFORE" ] \
              || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
              || ! git rev-parse --verify --quiet "${BEFORE}^{commit}" >/dev/null; then
-            git fetch --no-tags origin main >/dev/null 2>&1 || true
-            BASE=$(git merge-base origin/main "${{ github.sha }}" 2>/dev/null || true)
-            if [ -z "$BASE" ]; then
+            #git fetch --no-tags origin main >/dev/null 2>&1 || true
+            #BASE=$(git merge-base origin/main "${{ github.sha }}" 2>/dev/null || true)
+            #if [ -z "$BASE" ]; then
+            #  BASE=$(git rev-parse --verify --quiet "${{ github.sha }}^" || true)
+            #fi
               BASE=$(git rev-parse --verify --quiet "${{ github.sha }}^" || true)
-            fi
           else
             BASE="$BEFORE"
           fi
