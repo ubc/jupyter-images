@@ -8,4 +8,4 @@
 # (tagged <jupyter-images sha>-cw<codingworkspace sha>), but pause track-cw
 # first or it re-bumps within 15 minutes. Full SHAs only, for reproducibility.
 # Runbook: PIPELINE.md.
-1529ae6ef5e4aa81093cc453a4d445b52eedd12b
+b2c1b8be96b8041adb02d750720c3c133f7327d4
