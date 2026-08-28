@@ -86,10 +86,10 @@ cw_env = {
     "CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH": credential_issued_at_epoch,
     "CODINGWORKSPACE_ALLOWED_MODELS": allowed_models,
     "CODINGWORKSPACE_DEFAULT_MODEL": default_model,
-    # No personal Git credential. Imports are credential-free UBC HTTPS only.
+    # No personal Git credential. Imports are credential-free UBC CS HTTPS only.
     "CODINGWORKSPACE_GITHUB_BACKUP_ENABLED": "0",
     "CODINGWORKSPACE_REPOSITORY_IMPORT_ENABLED": "1",
-    "CODINGWORKSPACE_REPOSITORY_IMPORT_HOST": "github.ubc.ca",
+    "CODINGWORKSPACE_REPOSITORY_IMPORT_HOST": "github.students.cs.ubc.ca",
     "CODINGWORKSPACE_STARTER_REPO_URL": "/opt/codingworkspace-starters/GizmoApp",
     # Explicit retained-home paths.
     "CODINGWORKSPACE_WORKSPACE_ROOT": f"{cw_root}/workspaces",

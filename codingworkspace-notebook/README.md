@@ -87,7 +87,7 @@ The GizmoApp checkout is baked at
 `/opt/codingworkspace-starters/GizmoApp`, remains a SHA-1 Git repository, and is
 root-owned and non-writable. New projects clone from that local source without
 requiring a network or student Git credential. Network imports are limited to
-credential-free HTTPS repositories on `github.ubc.ca`.
+credential-free HTTPS repositories on `github.students.cs.ubc.ca`.
 
 The build verifies the exact source SHAs after checkout. Image labels and the
 workflow's release-evidence artifact record the full CodingWorkspace and
