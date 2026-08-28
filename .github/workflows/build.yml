@@ -1,150 +1,368 @@
-name: Build and Push Docker Images to ECR
+name: Validate and publish Docker images
 
 on:
-  push:
-    branches: [ "*" ]
-    tags: [ "*" ]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Build, scan, and publish immutable images from main
+        required: true
+        type: boolean
+        default: false
+      scope:
+        description: Images to build (the tracker selects codingworkspace-notebook)
+        required: true
+        type: choice
+        options:
+          - changed
+          - codingworkspace-notebook
+          - all
+        default: changed
+      promote_codingworkspace:
+        description: Move codingworkspace-notebook preview/latest after an approved CW release
+        required: true
+        type: boolean
+        default: false
+
+# Fork pull requests run only the non-secret validation job. AWS OIDC and the
+# private CodingWorkspace deploy key are reachable only from the publish job,
+# which is gated to reviewed main or an explicit dispatch of main.
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-and-push:
+  validate:
+    name: Non-secret image validation
     runs-on: ubuntu-latest
-
-    permissions:
-      id-token: write
-      contents: read
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate image configuration and CI policy
+        run: codingworkspace-notebook/ci/validate-static.sh
+
+  select-images:
+    name: Select image builds
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.select.outputs.images }}
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0  # Needed to fetch full history for diff
+          fetch-depth: 0
+
+      - name: Select images
+        id: select
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          DISPATCH_SCOPE: ${{ inputs.scope || 'changed' }}
+        run: |
+          images=$(python3 codingworkspace-notebook/ci/select_images.py \
+            --before "$BEFORE_SHA" \
+            --current "$CURRENT_SHA" \
+            --scope "$DISPATCH_SCOPE")
+          printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
+          printf 'Selected images: %s\n' "$images"
+
+  build-scan-publish:
+    name: Build and publish ${{ matrix.image }}
+    needs: [validate, select-images]
+    if: >-
+      needs.select-images.outputs.images != '[]' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish == true))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.select-images.outputs.images) }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      IMAGE_NAME: ${{ matrix.image }}
+    steps:
+      - name: Checkout reviewed main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
 
-      - name: Build, create ECR repo if needed, and push Docker images
+      - name: Resolve exact CodingWorkspace and GizmoApp sources
+        if: matrix.image == 'codingworkspace-notebook'
         env:
-          AWS_REGION: ${{ vars.AWS_REGION }}
-          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-          # Read-only deploy key for kevinlb1/CodingWorkspace (private), used
-          # only by the codingworkspace-notebook build. Absent on fork PRs.
           CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
         run: |
-          # Determine the base commit for the changed-files diff.
-          # github.event.before is the null SHA on a new branch's first push
-          # (and empty for pull_request events), which makes `git diff` abort
-          # with "fatal: bad object". Fall back to the merge-base with the
-          # default branch, then to the commit's first parent, so detection
-          # works for new branches, PRs, and normal pushes alike.
-          BEFORE="${{ github.event.before }}"
-          echo "Reported previous SHA: ${BEFORE:-<none>}"
-          echo "Current SHA: ${{ github.sha }}"
-
-          if [ -z "$BEFORE" ] \
-             || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
-             || ! git rev-parse --verify --quiet "${BEFORE}^{commit}" >/dev/null; then
-            #git fetch --no-tags origin main >/dev/null 2>&1 || true
-            #BASE=$(git merge-base origin/main "${{ github.sha }}" 2>/dev/null || true)
-            #if [ -z "$BASE" ]; then
-            #  BASE=$(git rev-parse --verify --quiet "${{ github.sha }}^" || true)
-            #fi
-              BASE=$(git rev-parse --verify --quiet "${{ github.sha }}^" || true)
-          else
-            BASE="$BEFORE"
+          set -euo pipefail
+          CW_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/CW_REF)
+          GIZMOAPP_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/GIZMOAPP_REF)
+          if [ -z "${CW_DEPLOY_KEY:-}" ]; then
+            echo "CW_DEPLOY_KEY is required for a trusted codingworkspace-notebook build." >&2
+            exit 1
           fi
 
-          # Get changed files between the resolved base and the current commit.
-          if [ -n "$BASE" ]; then
-            echo "Diffing against base: $BASE"
-            changed_files=$(git diff --name-only "$BASE" "${{ github.sha }}")
-          else
-            # Root commit with no parent: treat every tracked file as changed.
-            echo "No diff base found; treating all tracked files as changed."
-            changed_files=$(git ls-tree -r --name-only "${{ github.sha }}")
+          keyfile="$RUNNER_TEMP/cw_deploy_key"
+          known_hosts="$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts"
+          cwsrc="$RUNNER_TEMP/cw-src"
+          gizmosrc="$RUNNER_TEMP/gizmo-src"
+          cleanup() {
+            rm -f "$keyfile"
+          }
+          trap cleanup EXIT
+          umask 077
+          printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
+
+          rm -rf "$cwsrc" "$gizmosrc"
+          GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
+            git clone --quiet --no-tags git@github.com:kevinlb1/CodingWorkspace.git "$cwsrc"
+          git -C "$cwsrc" checkout --quiet --detach "$CW_REF"
+          test "$(git -C "$cwsrc" rev-parse HEAD)" = "$CW_REF"
+
+          git clone --quiet --no-tags https://github.com/kevinlb1/GizmoApp.git "$gizmosrc"
+          git -C "$gizmosrc" checkout --quiet --detach "$GIZMOAPP_REF"
+          test "$(git -C "$gizmosrc" rev-parse HEAD)" = "$GIZMOAPP_REF"
+          test "$(git -C "$gizmosrc" rev-parse --show-object-format)" = sha1
+
+          printf 'CW_REF=%s\n' "$CW_REF" >> "$GITHUB_ENV"
+          printf 'GIZMOAPP_REF=%s\n' "$GIZMOAPP_REF" >> "$GITHUB_ENV"
+          printf 'CW_CONTEXT=%s\n' "$cwsrc" >> "$GITHUB_ENV"
+          printf 'GIZMO_CONTEXT=%s\n' "$gizmosrc" >> "$GITHUB_ENV"
+
+      - name: Prepare immutable image name
+        run: |
+          set -euo pipefail
+          if [ -z "${ACCOUNT_ID:-}" ] || [ -z "${AWS_REGION:-}" ]; then
+            echo "AWS_ACCOUNT_ID and AWS_REGION must be configured for trusted publication." >&2
+            exit 1
           fi
+          # ECR permits mutable tags. Make every candidate tag run-unique so a
+          # rerun can never overwrite the artifact whose digest was reviewed.
+          tag="${GITHUB_SHA::7}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+          if [ "$IMAGE_NAME" = codingworkspace-notebook ]; then
+            test -n "${CW_REF:-}"
+            test -n "${GIZMOAPP_REF:-}"
+            tag="${GITHUB_SHA::7}-cw${CW_REF:0:7}-gz${GIZMOAPP_REF:0:7}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+          fi
+          registry="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          ecr_image="${registry}/${IMAGE_NAME}:${tag}"
+          local_image="local/${IMAGE_NAME}:${GITHUB_SHA::7}"
+          aws ecr describe-repositories --repository-names "$IMAGE_NAME" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null
+          printf 'IMMUTABLE_TAG=%s\n' "$tag" >> "$GITHUB_ENV"
+          printf 'ECR_REPOSITORY=%s/%s\n' "$registry" "$IMAGE_NAME" >> "$GITHUB_ENV"
+          printf 'ECR_IMAGE=%s\n' "$ecr_image" >> "$GITHUB_ENV"
+          printf 'LOCAL_IMAGE=%s\n' "$local_image" >> "$GITHUB_ENV"
 
-          echo "Changed files:"
-          echo "$changed_files"
-
-          for dir in */ ; do
-            dir=${dir%/}
-            # Check if any changed files in this directory
-            if echo "$changed_files" | grep -q "^$dir/"; then
-              echo "Detected changes in $dir - processing..."
-
-              IMAGE_NAME="$dir"
-              ECR_REPO="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME"
-
-              # Check if ECR repo exists, create if not
-              if ! aws ecr describe-repositories --repository-names "$IMAGE_NAME" > /dev/null 2>&1; then
-                echo "ECR repository $IMAGE_NAME does not exist. Creating..."
-                aws ecr create-repository --repository-name "$IMAGE_NAME" > /dev/null || true
-              else
-                echo "ECR repository $IMAGE_NAME already exists."
-              fi
-
-              # Build and push image
-              TAG="${GITHUB_SHA::7}"
-              EXTRA_BUILD_ARGS=()
-
-              # codingworkspace-notebook installs CodingWorkspace from source,
-              # and that repo (kevinlb1/CodingWorkspace) is private: clone it
-              # with the read-only CW_DEPLOY_KEY deploy key at the ref pinned
-              # in codingworkspace-notebook/CW_REF, and hand it to the build as
-              # the `cwsrc` named context the image's Dockerfile expects. The
-              # clone lives in RUNNER_TEMP so it never leaks into the default
-              # build context of the other images. Skipped (not failed) when
-              # the secret is unavailable, e.g. on pull requests from forks.
-              if [ "$dir" = "codingworkspace-notebook" ]; then
-                if [ -z "${CW_DEPLOY_KEY:-}" ]; then
-                  echo "CW_DEPLOY_KEY secret unavailable (fork PR?); skipping $dir."
-                  continue
-                fi
-                CW_REF=$(grep -Ev '^[[:space:]]*(#|$)' "$dir/CW_REF" | head -n1 | tr -d '[:space:]')
-                if [ -z "$CW_REF" ]; then
-                  echo "ERROR: $dir/CW_REF contains no ref." >&2
-                  exit 1
-                fi
-                echo "Cloning CodingWorkspace at pinned ref: $CW_REF"
-                keyfile="$RUNNER_TEMP/cw_deploy_key"
-                printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
-                chmod 600 "$keyfile"
-                rm -rf "$RUNNER_TEMP/cw-src"
-                GIT_SSH_COMMAND="ssh -i $keyfile -o StrictHostKeyChecking=accept-new" \
-                  git clone --quiet git@github.com:kevinlb1/CodingWorkspace.git "$RUNNER_TEMP/cw-src"
-                rm -f "$keyfile"
-                # A SHA resolves directly; a branch name needs the origin/ prefix.
-                git -C "$RUNNER_TEMP/cw-src" checkout --quiet --detach "$CW_REF" 2>/dev/null \
-                  || git -C "$RUNNER_TEMP/cw-src" checkout --quiet --detach "origin/$CW_REF"
-                CW_SHA=$(git -C "$RUNNER_TEMP/cw-src" rev-parse --short=7 HEAD)
-                TAG="${TAG}-cw${CW_SHA}"
-                EXTRA_BUILD_ARGS+=(--build-context "cwsrc=$RUNNER_TEMP/cw-src")
-              fi
-
-              docker buildx build --load "${EXTRA_BUILD_ARGS[@]}" -f "$dir/Dockerfile" -t "$ECR_REPO:$TAG" .
-              docker push "$ECR_REPO:$TAG"
-              docker tag "$ECR_REPO:$TAG" "$ECR_REPO:latest"
-              docker push "$ECR_REPO:latest"
-
-              # Moving :preview tag for the preview hub, whose profile pulls
-              # with image_pull_policy Always - new spawns pick up new builds
-              # without a hub deploy. Only refreshed from main; prod pins
-              # immutable <ji>-cw<cw> tags in jhub-config.
-              if [ "$dir" = "codingworkspace-notebook" ] && [ "$GITHUB_REF_NAME" = "main" ]; then
-                docker tag "$ECR_REPO:$TAG" "$ECR_REPO:preview"
-                docker push "$ECR_REPO:preview"
-              fi
-            else
-              echo "No changes in $dir, skipping build."
-            fi
+      - name: Build and publish immutable candidate with provenance and BuildKit SBOM
+        id: publish_candidate
+        run: |
+          set -euo pipefail
+          build_args=(
+            --push
+            --provenance=mode=max
+            --sbom=true
+            -f "$IMAGE_NAME/Dockerfile"
+            -t "$ECR_IMAGE"
+          )
+          if [ "$IMAGE_NAME" = codingworkspace-notebook ]; then
+            build_args+=(
+              --build-context "cwsrc=$CW_CONTEXT"
+              --build-context "gizmosrc=$GIZMO_CONTEXT"
+              --build-arg "CW_REF=$CW_REF"
+              --build-arg "GIZMOAPP_REF=$GIZMOAPP_REF"
+            )
+          fi
+          docker buildx build "${build_args[@]}" .
+          digest=""
+          for attempt in $(seq 1 12); do
+            digest=$(aws ecr describe-images \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids "imageTag=$IMMUTABLE_TAG" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text 2>/dev/null || true)
+            case "$digest" in
+              sha256:????????????????????????????????????????????????????????????????) break ;;
+            esac
+            sleep 5
           done
+          case "$digest" in
+            sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "ECR did not return a valid immutable digest: $digest" >&2; exit 1 ;;
+          esac
+          # Every subsequent smoke/scan operates on the exact published digest.
+          # A rejected candidate may remain addressable by its immutable tag but
+          # is never promoted to a moving tag.
+          printf 'IMAGE_DIGEST=%s\n' "$digest" >> "$GITHUB_ENV"
+          docker pull "$ECR_REPOSITORY@$digest"
+          docker tag "$ECR_REPOSITORY@$digest" "$LOCAL_IMAGE"
+
+      - name: Run CodingWorkspace image contract smoke
+        id: contract_smoke
+        if: matrix.image == 'codingworkspace-notebook'
+        run: >-
+          codingworkspace-notebook/ci/smoke-image.sh
+          contract "$LOCAL_IMAGE" "$CW_REF" "$GIZMOAPP_REF"
+
+      - name: Prepare evidence directory
+        run: mkdir -p evidence
+
+      - name: Generate SPDX SBOM
+        id: sbom
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output-file: evidence/${{ matrix.image }}.spdx.json
+          syft-version: v1.51.1
+          upload-artifact: false
+          dependency-snapshot: false
+
+      - name: Generate vulnerability report
+        id: vulnerability_scan
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          format: json
+          output: evidence/${{ matrix.image }}-trivy.json
+          version: v0.74.0
+          scanners: vuln
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+
+      - name: Record release evidence
+        if: always()
+        run: |
+          mkdir -p evidence
+          {
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'workflow_run=%s/actions/runs/%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'jupyter_images_commit=%s\n' "$GITHUB_SHA"
+            printf 'image=%s\n' "${ECR_IMAGE:-not-published}"
+            printf 'digest=%s\n' "${IMAGE_DIGEST:-not-published}"
+            printf 'codingworkspace_commit=%s\n' "${CW_REF:-not-applicable}"
+            printf 'gizmoapp_commit=%s\n' "${GIZMOAPP_REF:-not-applicable}"
+            printf 'prepromotion_job_status=%s\n' "${{ job.status }}"
+            printf 'immutable_publish_result=%s\n' "${{ steps.publish_candidate.outcome }}"
+            printf 'contract_smoke_result=%s\n' "${{ steps.contract_smoke.outcome }}"
+            printf 'sbom_result=%s\n' "${{ steps.sbom.outcome }}"
+            printf 'vulnerability_scan_result=%s\n' "${{ steps.vulnerability_scan.outcome }}"
+            printf 'codingworkspace_promotion_requested=%s\n' "${{ matrix.image == 'codingworkspace-notebook' && github.event_name == 'workflow_dispatch' && inputs.promote_codingworkspace == true }}"
+            printf 'syft=v1.51.1\n'
+            printf 'trivy=v0.74.0\n'
+          } > "evidence/${IMAGE_NAME}-release.txt"
+
+      - name: Upload build, SBOM, and vulnerability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.image }}-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+      # Evidence upload is itself a release gate. No registry tag moves until
+      # the exact digest, SBOM, vulnerability report, and outcomes are durable.
+      - name: Move ordinary latest tag
+        if: matrix.image != 'codingworkspace-notebook'
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "$ECR_REPOSITORY:latest" "$ECR_REPOSITORY@$IMAGE_DIGEST"
+          observed=""
+          for attempt in $(seq 1 12); do
+            observed=$(aws ecr describe-images \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids imageTag=latest \
+              --query 'imageDetails[0].imageDigest' \
+              --output text 2>/dev/null || true)
+            [ "$observed" = "$IMAGE_DIGEST" ] && break
+            sleep 5
+          done
+          if [ "$observed" != "$IMAGE_DIGEST" ]; then
+            echo "latest resolved to $observed, expected $IMAGE_DIGEST" >&2
+            exit 1
+          fi
+          printf 'ORDINARY_LATEST_MOVED=true\n' >> "$GITHUB_ENV"
+
+      - name: Promote approved CodingWorkspace release
+        if: >-
+          matrix.image == 'codingworkspace-notebook' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.promote_codingworkspace == true
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "$ECR_REPOSITORY:latest" "$ECR_REPOSITORY@$IMAGE_DIGEST"
+          observed=""
+          for attempt in $(seq 1 12); do
+            observed=$(aws ecr describe-images \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids imageTag=latest \
+              --query 'imageDetails[0].imageDigest' \
+              --output text 2>/dev/null || true)
+            [ "$observed" = "$IMAGE_DIGEST" ] && break
+            sleep 5
+          done
+          if [ "$observed" != "$IMAGE_DIGEST" ]; then
+            echo "latest resolved to $observed, expected $IMAGE_DIGEST" >&2
+            exit 1
+          fi
+          printf 'CODINGWORKSPACE_LATEST_MOVED=true\n' >> "$GITHUB_ENV"
+
+          # Preview is the Hub-consumed moving tag, so update it last and only
+          # after latest has been observed at the tested digest.
+          docker buildx imagetools create --tag "$ECR_REPOSITORY:preview" "$ECR_REPOSITORY@$IMAGE_DIGEST"
+          observed=""
+          for attempt in $(seq 1 12); do
+            observed=$(aws ecr describe-images \
+              --repository-name "$IMAGE_NAME" \
+              --image-ids imageTag=preview \
+              --query 'imageDetails[0].imageDigest' \
+              --output text 2>/dev/null || true)
+            [ "$observed" = "$IMAGE_DIGEST" ] && break
+            sleep 5
+          done
+          if [ "$observed" != "$IMAGE_DIGEST" ]; then
+            echo "preview resolved to $observed, expected $IMAGE_DIGEST" >&2
+            exit 1
+          fi
+          printf 'CODINGWORKSPACE_PREVIEW_MOVED=true\n' >> "$GITHUB_ENV"
+
+      - name: Summarize verified moving tags
+        if: always()
+        # The authoritative checks are the promotion step's ECR read-backs and
+        # the already-uploaded candidate evidence. A UI-summary write must not
+        # turn a completed live tag move into a misleading failed release.
+        continue-on-error: true
+        run: |
+          {
+            printf '### Registry promotion result\n\n'
+            printf -- '- Tested digest: `%s`\n' "${IMAGE_DIGEST:-not-published}"
+            printf -- '- Ordinary latest verified: `%s`\n' "${ORDINARY_LATEST_MOVED:-false}"
+            printf -- '- CodingWorkspace latest verified: `%s`\n' "${CODINGWORKSPACE_LATEST_MOVED:-false}"
+            printf -- '- CodingWorkspace preview verified: `%s`\n' "${CODINGWORKSPACE_PREVIEW_MOVED:-false}"
+          } >> "$GITHUB_STEP_SUMMARY"

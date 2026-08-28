@@ -1,50 +1,152 @@
+"""Fail-closed Jupyter Server configuration for CodingWorkspace pods."""
 
-# --- CodingWorkspace via jupyter-server-proxy --------------------------------
-# Appended to /etc/jupyter/jupyter_server_config.py at image build time.
-# `c` is already defined by the base config file above.
-#
-# CodingWorkspace runs as a normal subprocess on 127.0.0.1:8768 and is served
-# under the Jupyter base at /user/<name>/codingworkspace/. It reads its identity
-# from JUPYTERHUB_USER (auth_mode=jupyterhub) and proxies each student's preview
-# app via the sibling /user/<name>/proxy/<port>/ endpoint (websocket-capable).
-#
-# {base_url} is substituted by jupyter-server-proxy to the Jupyter base, e.g.
-# /user/alice/.
+from __future__ import annotations
+
 import os
+import secrets
+import sys
+import time
 
+
+RUNTIME_ROOT = "/opt/codingworkspace-jupyter/runtime"
+if RUNTIME_ROOT not in sys.path:
+    sys.path.insert(0, RUNTIME_ROOT)
+
+from codingworkspace_jupyter_runtime import CodingWorkspaceOnlyAuthorizer  # noqa: E402
+
+
+proxy_token = secrets.token_urlsafe(48)
+raw_credential_issued_at_epoch = os.environ.get(
+    "CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH", "0"
+).strip()
+try:
+    parsed_credential_issued_at_epoch = int(raw_credential_issued_at_epoch)
+except ValueError as exc:
+    raise RuntimeError(
+        "CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH must be a non-negative Unix epoch"
+    ) from exc
+if (
+    parsed_credential_issued_at_epoch < 0
+    or parsed_credential_issued_at_epoch > int(time.time()) + 300
+):
+    raise RuntimeError(
+        "CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH must be 0 or a plausible past Unix epoch"
+    )
+credential_issued_at_epoch = str(parsed_credential_issued_at_epoch)
+allowed_models = os.environ.get(
+    "CODINGWORKSPACE_ALLOWED_MODELS", "openai/gpt-5.4-mini"
+).strip()
+default_model = os.environ.get(
+    "CODINGWORKSPACE_DEFAULT_MODEL", "openai/gpt-5.4-mini"
+).strip()
+allowed_model_set = {item.strip() for item in allowed_models.split(",") if item.strip()}
+if not allowed_model_set or default_model not in allowed_model_set:
+    raise RuntimeError(
+        "CODINGWORKSPACE_DEFAULT_MODEL must be present in the non-empty "
+        "CODINGWORKSPACE_ALLOWED_MODELS allowlist"
+    )
+
+cw_root = "/home/jovyan/cw"
+cw_run = f"{cw_root}/run"
 cw_env = {
+    "CODINGWORKSPACE_CONFIG_FILE": "/opt/codingworkspace-jupyter/runtime/CodingWorkspace.env",
     "CODINGWORKSPACE_AUTH_MODE": "jupyterhub",
-    "CODINGWORKSPACE_ISOLATION_MODE": "logical",       # the pod is the sandbox
-    "CODINGWORKSPACE_REMOTE_WORKERS_ENABLED": "0",     # turns run locally, in this pod
-    "CODINGWORKSPACE_AGENT_BACKEND": "opencode",
-    # Clone the (public) starter over HTTPS: the pod has no SSH key/known_hosts,
-    # so the default git@github.com: SSH URL fails host-key verification (exit 128).
-    "CODINGWORKSPACE_STARTER_REPO_URL": "https://github.com/kevinlb1/GizmoApp.git",
-    "CODINGWORKSPACE_BIND_HOST": "127.0.0.1",          # only server-proxy (same pod) reaches it
+    "CODINGWORKSPACE_PROXY_AUTH_TOKEN": proxy_token,
+    "CODINGWORKSPACE_BIND_HOST": "127.0.0.1",
     "CODINGWORKSPACE_PLATFORM_PORT": "8768",
     "CODINGWORKSPACE_URL_PREFIX": "{base_url}codingworkspace",
-    "CODINGWORKSPACE_WORKSPACE_ROOT": "/home/jovyan/cw/workspaces",
-    "CODINGWORKSPACE_RUN_DIR": "/home/jovyan/cw/run",
-    "CODINGWORKSPACE_REPO_ROOT": "/home/jovyan/cw/repos",
-    "CODINGWORKSPACE_LOG_DIR": "/home/jovyan/cw/logs",
-    "CODINGWORKSPACE_STATE_DB": "/home/jovyan/cw/run/CodingWorkspace.sqlite3",
-    # _preview_url() builds the sibling /proxy/<port>/ path from this at request time.
     "JUPYTERHUB_SERVICE_PREFIX": os.environ.get("JUPYTERHUB_SERVICE_PREFIX", "/"),
+    "CODINGWORKSPACE_ADMIN_USERS": os.environ.get("CODINGWORKSPACE_ADMIN_USERS", ""),
+    # Mandatory child-process boundary for untrusted repositories.
+    "CODINGWORKSPACE_ISOLATION_MODE": "bubblewrap",
+    "CODINGWORKSPACE_BUBBLEWRAP_COMMAND": "/usr/bin/bwrap",
+    "CODINGWORKSPACE_BUBBLEWRAP_RUNTIME_ROOTS": "/usr:/opt",
+    "CODINGWORKSPACE_AGENT_BACKEND": "opencode",
+    "CODINGWORKSPACE_OPENCODE_COMMAND": "/usr/local/bin/opencode",
+    "CODINGWORKSPACE_ISOLATION_OPENCODE_COMMAND": "/usr/local/bin/opencode",
+    "CODINGWORKSPACE_LOCAL_AGENT_MODEL_PROXY_ENABLED": "1",
+    # Remote code execution and unfinished multi-pod features are forbidden.
+    "CODINGWORKSPACE_REMOTE_WORKERS_ENABLED": "0",
+    "CODINGWORKSPACE_APP_MEDIA_PROXY_ENABLED": "0",
+    "CODINGWORKSPACE_MEDIA_WORKERS_ENABLED": "0",
+    "CODINGWORKSPACE_MEDIA_VOICE_CLONE_ENABLED": "0",
+    "CODINGWORKSPACE_PROJECT_SELECTION_ENABLED": "0",
+    "CODINGWORKSPACE_INSTITUTIONAL_GIT_ENABLED": "0",
+    # Centrally injected, student-scoped LiteLLM only.
+    "CODINGWORKSPACE_PERSONAL_MODEL_AUTH_ENABLED": "0",
+    "CODINGWORKSPACE_MODEL_DISCOVERY_ENABLED": "1",
+    "CODINGWORKSPACE_MODEL_DISCOVERY_CACHE_SECONDS": "300",
+    "CODINGWORKSPACE_AI_BUDGET_LOOKUP_ENABLED": "0",
+    "CODINGWORKSPACE_MODEL_CREDENTIAL_LIFETIME_SECONDS": "172800",
+    "CODINGWORKSPACE_MODEL_CREDENTIAL_WARNING_SECONDS": "21600",
+    "CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH": credential_issued_at_epoch,
+    "CODINGWORKSPACE_ALLOWED_MODELS": allowed_models,
+    "CODINGWORKSPACE_DEFAULT_MODEL": default_model,
+    # No personal Git credential. Imports are credential-free UBC HTTPS only.
+    "CODINGWORKSPACE_GITHUB_BACKUP_ENABLED": "0",
+    "CODINGWORKSPACE_REPOSITORY_IMPORT_ENABLED": "1",
+    "CODINGWORKSPACE_REPOSITORY_IMPORT_HOST": "github.ubc.ca",
+    "CODINGWORKSPACE_STARTER_REPO_URL": "/opt/codingworkspace-starters/GizmoApp",
+    # Explicit retained-home paths.
+    "CODINGWORKSPACE_WORKSPACE_ROOT": f"{cw_root}/workspaces",
+    "CODINGWORKSPACE_ISOLATED_WORKSPACE_ROOT": f"{cw_root}/isolated-workspaces",
+    "CODINGWORKSPACE_REPO_ROOT": f"{cw_root}/repos",
+    "CODINGWORKSPACE_LOG_DIR": f"{cw_root}/logs",
+    "CODINGWORKSPACE_RUN_DIR": cw_run,
+    "CODINGWORKSPACE_STATE_DB": f"{cw_run}/CodingWorkspace.sqlite3",
+    "CODINGWORKSPACE_RESTART_DRAIN_FILE": f"{cw_run}/restart-drain",
+    "CODINGWORKSPACE_GITHUB_CREDENTIALS_DIR": f"{cw_run}/github-credentials",
+    "CODINGWORKSPACE_OPENCODE_AUTH_ROOT": f"{cw_run}/opencode-auth",
+    "CODINGWORKSPACE_OPENCODE_UPDATE_DIR": f"{cw_run}/opencode-updates",
+    "CODINGWORKSPACE_WORKER_SCRATCH_ROOT": f"{cw_run}/worker-scratch",
+    "CODINGWORKSPACE_WORKER_TOKEN_FILE": f"{cw_run}/worker-token",
+    "CODINGWORKSPACE_MEDIA_WORKER_TOKEN_FILE": f"{cw_run}/media-worker-token",
+    # EFS-safe SQLite and bounded same-PVC checkpoints.
+    "CODINGWORKSPACE_SQLITE_JOURNAL_MODE": "DELETE",
+    "CODINGWORKSPACE_SQLITE_SYNCHRONOUS": "FULL",
+    "CODINGWORKSPACE_SQLITE_BACKUP_INTERVAL_SECONDS": "900",
+    "CODINGWORKSPACE_SQLITE_BACKUP_MAX_MB": "512",
+    # App admission/readiness limits; hard EFS limits remain a Hub concern.
+    "CODINGWORKSPACE_WORKSPACE_DISK_QUOTA_MB": "2048",
+    "CODINGWORKSPACE_WORKSPACE_FILE_QUOTA": "100000",
+    "CODINGWORKSPACE_TOTAL_STORAGE_QUOTA_MB": "5120",
+    "CODINGWORKSPACE_MIN_FREE_DISK_MB": "512",
+    "CODINGWORKSPACE_MAX_WORKSPACES_PER_USER": "20",
+    "CODINGWORKSPACE_MAX_USER_RUNNING_TURNS": "1",
+    "CODINGWORKSPACE_MAX_USER_QUEUED_TURNS": "2",
+    "CODINGWORKSPACE_SHUTDOWN_TIMEOUT_SECONDS": "90",
 }
+
+# Preserve unrelated system entries, but explicitly defeat auto-discovery of
+# every user-facing Jupyter surface and the stock arbitrary-port proxy.
+c.ServerApp.jpserver_extensions.update(
+    {
+        "jupyter_server_proxy": False,
+        "jupyterlab": False,
+        "notebook": False,
+        "notebook_shim": False,
+        "codingworkspace_jupyter_runtime": True,
+    }
+)
+c.ServerApp.authorizer_class = CodingWorkspaceOnlyAuthorizer
+c.ServerApp.terminals_enabled = False
+c.ServerApp.root_dir = "/opt/codingworkspace-jupyter/empty-root"
+c.ServerApp.default_url = "/codingworkspace/"
+c.ServerApp.open_browser = False
+c.ServerApp.quit_button = False
 
 c.ServerProxy.servers = {
     "codingworkspace": {
-        "command": ["python", "-m", "codingworkspace.server", "serve"],
+        "command": ["/opt/conda/bin/python", "-m", "codingworkspace.server", "serve"],
         "port": 8768,
-        # absolute_url=True: forward the full /user/<name>/codingworkspace/ path to
-        # the backend (do NOT strip the prefix), matching CODINGWORKSPACE_URL_PREFIX
-        # above. Same pattern as GizmoApp. With False, CW would receive "/" and 404.
+        # Preserve /user/<name>/codingworkspace/... for the prefix-aware app.
         "absolute_url": True,
         "timeout": 120,
         "environment": cw_env,
-        "launcher_entry": {"enabled": False},   # no notebook launcher tile
+        "request_headers_override": {
+            # Tornado HTTPHeaders.update replaces any client-supplied value.
+            "X-CodingWorkspace-Proxy-Token": proxy_token,
+        },
+        "launcher_entry": {"enabled": False},
     }
 }
-
-# Land students directly in CodingWorkspace, not the Jupyter file browser.
-c.ServerApp.default_url = "/codingworkspace/"

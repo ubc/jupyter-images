@@ -1,142 +1,324 @@
-# codingworkspace-notebook CI/CD pipeline (ops)
+# codingworkspace-notebook CI/CD pipeline
 
-Audience: LT Hub / AppCloud operators. The developer-facing "how do I
-release" guide is `RELEASING.md` in the CodingWorkspace repo; this document
-explains how the machinery works, its credentials, and the runbook.
+Audience: LT Hub/AppCloud operators and course release maintainers. This
+runbook describes the trust boundary, source pins, artifacts, promotion, and
+rollback. The CodingWorkspace repository's `RELEASING.md` remains the
+developer-facing release guide.
 
-## Flow
+## Trust-separated flow
 
 ```text
-kevinlb1/CodingWorkspace                ubc/jupyter-images                          ECR / EKS
-------------------------                ------------------                          ---------
-push/merge to `release`  ──(≤15 min)──▶ track-cw.yml (cron, on main)
-                                          │ ls-remote release via CW_DEPLOY_KEY
-                                          │ bump codingworkspace-notebook/CW_REF
-                                          │   (bot commit on main)
-                                          └─▶ dispatch build.yml ────────────────▶ push <ji7>-cw<cw7>
-                                                │ clone CW at CW_REF (deploy key)          + :latest
-                                                │ build with cwsrc context                 + :preview
-                                                                                             │
-preview hub profile: image :preview, image_pull_policy Always ◀──────────────── new spawns pull it
-prod hub profile:    immutable <ji7>-cw<cw7> pin, changed via jhub-config PR + helm (the gate)
+fork or same-repo PR
+  └─ validate: no secrets, no AWS, no image publication
+
+reviewed jupyter-images main push
+  └─ validate → build/push immutable candidate → pull exact digest
+                                                  └─ image smoke + SBOM/vulnerability scan
+                                                     (CodingWorkspace preview/latest stay put)
+
+CodingWorkspace release branch moves
+  └─ track-cw.yml (main, every 15 min or manual)
+       ├─ resolve release with read-only CW_DEPLOY_KEY
+       ├─ update the full SHA in CW_REF and push with GITHUB_TOKEN
+       └─ explicitly dispatch build.yml on main with
+            publish=true
+            scope=codingworkspace-notebook
+            promote_codingworkspace=true
+              └─ build/push immutable digest → pull/smoke/scan that digest
+                                             └─ move preview + latest only after checks
+
+preview Hub: follows preview for new spawns
+production Hub: pins the accepted immutable digest through jhub-config review
 ```
 
-## Components
+The tracker's `GITHUB_TOKEN` push does not trigger another push workflow, so a
+release movement results in the one explicitly dispatched image build, not a
+push build plus a second dispatch build. If GitHub changes that recursion
+behavior or the tracker is changed to use a PAT/App token, preserve an explicit
+duplicate-build guard.
 
-| Piece | Where | Notes |
-|-------|-------|-------|
-| `track-cw.yml` | `.github/workflows/`, on `main` | Cron `7,22,37,52 * * * *` + `workflow_dispatch`. Must live on the default branch: GitHub only runs scheduled workflows from there. Checks out and commits to `main` (`JI_BRANCH` env) |
-| `build.yml` | `.github/workflows/`, on `main` | Unchanged multi-image build, plus: clones the private CW repo at `CW_REF` into `$RUNNER_TEMP/cw-src` (kept out of the other images' build contexts) and passes it as the `cwsrc` named context; pushes the moving `:preview` tag for this image, `main` only; **skips (not fails)** this image when the secret is unavailable (fork PRs) |
-| `CW_REF` | `codingworkspace-notebook/`, on `main` | Pin file, full CW commit SHA. Owned by the tracker; manual edits get overwritten within 15 min unless the tracker is paused |
-| Preview hub values | `jhub-config/config-preview-keycloak.yaml` | `ai100-codingworkspace` profile: `image: …:preview`, `image_pull_policy: Always` |
-| Prod hub values | `jhub-config/config-prd-keycloak.yaml` | Must pin an immutable `<ji7>-cw<cw7>` tag. Never point prod at `:preview` or `:latest` |
+An image-source merge can therefore be reviewed and merged while
+CodingWorkspace `release` remains on a rollback commit: the merge produces an
+immutable candidate but cannot alter either moving CodingWorkspace tag. Do not
+manually dispatch promotion merely to test an image PR.
 
-Two GitHub quirks explain the workflow shape:
+## Workflow policy
 
-1. **Scheduled workflows run only from the default branch** — so `track-cw.yml`
-   runs from `main`, which is also where the image sources live.
-2. **Pushes made with `GITHUB_TOKEN` never trigger `push` workflows**
-   (recursion guard). The tracker's bump commit alone would build nothing, so
-   it explicitly dispatches `build.yml` (`workflow_dispatch` is exempt from
-   the guard).
+`build.yml` has three stages:
 
-## Tags
+1. **Non-secret validation.** Runs for all PRs and `main` pushes with only
+   `contents: read`. It validates source-pin format, workflow/YAML/Python/shell
+   syntax, the source/promotion trust boundary, immutable Action pins, GitHub's
+   pinned SSH host key, and the expected image/config hardening. Fork PR code
+   never receives AWS OIDC permission or `CW_DEPLOY_KEY`.
+2. **Trusted selection.** Determines changed image directories. A root-level
+   shared build input rebuilds all images; docs/workflow-only changes do not
+   silently publish an image. An explicit dispatch can select changed images,
+   all images, or only `codingworkspace-notebook`.
+3. **Trusted build/publish/scan/promote.** Runs only for a push to `main`, or a
+   `workflow_dispatch` of `main` with `publish=true`. It resolves exact sources,
+   publishes one immutable ECR image with BuildKit provenance/SBOM attestations,
+   resolves and pulls that exact ECR digest, and runs the CodingWorkspace smoke,
+   Syft, and Trivy against the pulled digest. Moving tags occur only after every
+   check succeeds. A rejected immutable candidate may remain in ECR for
+   diagnosis, but it is never promoted.
 
-| Tag | Meaning |
-|-----|---------|
-| `<ji7>-cw<cw7>` | Immutable: jupyter-images commit + CodingWorkspace commit that produced it. The only thing prod may pin |
-| `preview` | Moving; always equals the newest immutable tag built from the canonical branch. The preview hub follows it |
-| `latest` | Pushed by the generic build loop for every image; informational only |
-| `*.dirty` | From the local fallback script with uncommitted changes; never deploy |
+For non-CodingWorkspace images, a trusted `main` publication retains the
+existing behavior of moving `latest`. For `codingworkspace-notebook`, both
+`latest` and `preview` require all of these conditions:
 
-`docker buildx imagetools inspect <repo>:preview` shows the digest — match it
-against the immutable tags to answer "what is preview running right now?"
-(that's also how you pick the tag to promote to prod).
+- the event is `workflow_dispatch`;
+- the workflow is running the reviewed `main` ref;
+- `publish=true`; and
+- `promote_codingworkspace=true`.
 
-## Credentials
+`ci/validate_ci_policy.py` regression-tests these conditions and the tracker
+dispatch. Branch protection on `main` and required validation remain an
+administrator setting outside this repository.
 
-| Credential | Scope | Notes |
-|------------|-------|-------|
-| `CW_DEPLOY_KEY` (Actions secret) | Read-only deploy key on `kevinlb1/CodingWorkspace` | Used by both workflows to ls-remote/clone the private repo. ed25519, fingerprint `SHA256:rS/MKFM52MbgrnLQDX3juJvh4hfSIqlnUXOdK/xXMDc`. Exposure risk: anyone with write access to this repo can exfiltrate via a workflow edit; it grants read-only CW source access (same trust circle that ships code into student pods) |
-| `GITHUB_TOKEN` | Per-run | `track-cw.yml` requests `contents: write` (bump push) + `actions: write` (dispatch) |
-| AWS OIDC role `github` | ECR push | Pre-existing, unchanged |
+## Immutable source resolution
 
-**Rotating the deploy key:** generate a new pair
-(`ssh-keygen -t ed25519 -N ''`); add the public key as a second read-only
-deploy key on the CW repo; replace the `CW_DEPLOY_KEY` secret with the new
-private key; run `track-cw.yml` manually to confirm; delete the old deploy
-key.
+| Input | Resolution and verification |
+| --- | --- |
+| jupyter-images | The checked-out full `GITHUB_SHA` on reviewed `main` |
+| CodingWorkspace | Exactly one lowercase 40-character SHA in `CW_REF`; private clone with `CW_DEPLOY_KEY`; detached checkout must equal that SHA |
+| GizmoApp | Exactly one lowercase 40-character SHA in `GIZMOAPP_REF`; credential-free public clone; detached checkout must equal that SHA and use SHA-1 object format |
+| Base image | Version tag plus `sha256` digest in `Dockerfile` |
+| OpenCode and other runtime tools | Fixed versions/checksums in reviewed image pin files |
 
-## Runbook
+The private clone uses the checked-in GitHub Ed25519 host key at
+`ci/github_known_hosts` with strict host checking. Static validation compares
+its key fingerprint with GitHub's published
+`SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`. Review and update the key
+from GitHub's official metadata/documentation if GitHub rotates it; never fall
+back to `accept-new` or a live unverified `ssh-keyscan`.
 
-**Verify a release went through**
+Candidate tags are run-unique because this ECR repository must also support the
+moving `preview`/`latest` tags and is therefore tag-mutable. CodingWorkspace uses
+`<ji7>-cw<cw7>-gz<gizmo7>-r<run-id>-a<attempt>`; other images use
+`<ji7>-r<run-id>-a<attempt>`. A rerun cannot overwrite an earlier candidate.
+Tags are still pointers, not sufficient release evidence. The full GizmoApp and
+CodingWorkspace commits, jupyter-images commit, tested ECR digest, scanner
+versions, and workflow run are stored in the 90-day workflow artifact and image
+labels. Production should record/copy that evidence into the course release
+record before artifact expiry.
+
+## Credentials and permissions
+
+| Credential/capability | Scope | Used where |
+| --- | --- | --- |
+| `CW_DEPLOY_KEY` | Read-only deploy key for `kevinlb1/CodingWorkspace` | Trusted tracker and trusted CodingWorkspace image build only |
+| AWS GitHub OIDC role `github` | ECR repository/image publication | Trusted build job only (`id-token: write`) |
+| `GITHUB_TOKEN` | `contents: write`, `actions: write` | Tracker only, to update `CW_REF` and dispatch the trusted build |
+| Public HTTPS | Read-only GizmoApp clone and fixed scanner/runtime artifacts | Trusted build |
+
+The deploy-key file is created with a restrictive umask under `RUNNER_TEMP`, is
+never passed into Docker, and is removed by a shell trap. The private clone is a
+named BuildKit context; it is not part of the default repository context.
+
+Third-party Actions are pinned by full commit SHA. The currently reviewed
+major/release refs were resolved to these commits on 2026-08-27:
+
+| Action | Immutable commit | Reviewed ref |
+| --- | --- | --- |
+| `actions/checkout` | `11d5960a326750d5838078e36cf38b85af677262` | `v4` |
+| `docker/setup-buildx-action` | `8d2750c68a42422c14e847fe6c8ac0403b4cbd6f` | `v3` |
+| `aws-actions/configure-aws-credentials` | `7474bc4690e29a8392af63c5b98e7449536d5c3a` | `v4` (peeled commit; `ff7170…` is the annotated tag object) |
+| `aws-actions/amazon-ecr-login` | `03f1aad4c6c7ffd436567f42f9384779290529bd` | `v2` |
+| `anchore/sbom-action` | `e22c389904149dbc22b58101806040fa8d37a610` | `v0` |
+| `aquasecurity/trivy-action` | `57a97c7e7821a5776cebc9bb87c984fa69cba8f1` | `0.35.0` |
+| `actions/upload-artifact` | `ea165f8d65b6e75b540449e92b4886f43607fa02` | `v4` |
+
+Re-resolve and review the upstream source before changing any SHA. A Dependabot
+or automated pin update is a proposed change, not authority to publish.
+
+## SBOM, vulnerability, and release evidence
+
+The trusted job publishes the immutable candidate once, resolves its registry
+digest, pulls that exact digest, and then scans it:
+
+- Syft `v1.51.1` writes SPDX JSON;
+- Trivy `v0.74.0` writes a JSON report containing all severities, fixed and
+  unfixed; and
+- the pushed BuildKit result includes maximum provenance plus an SBOM
+  attestation.
+
+The workflow artifact also records the exact source revisions, tested ECR
+tag/digest, workflow run, and whether CodingWorkspace promotion was requested.
+Scanner-generation or smoke failure blocks moving-tag promotion, though the
+immutable candidate already pushed may remain for diagnosis. Finding a
+vulnerability does not currently fail the build (`exit-code: 0`): a release
+reviewer must triage the report, record accepted exceptions with an owner/expiry,
+and block promotion for an unacceptable finding. Converting that review into
+severity/exception policy is follow-up work; silently treating a generated
+report as a security pass is not acceptable.
+
+## Automated and deployment smoke tests
+
+The trusted job runs:
 
 ```bash
-gh run list --repo ubc/jupyter-images --workflow track-cw.yml --limit 3
-gh run list --repo ubc/jupyter-images --workflow build.yml --branch codingworkspace-notebook --limit 3
-aws ecr describe-images --repository-name codingworkspace-notebook \
-  --region ca-central-1 \
-  --query 'sort_by(imageDetails,&imagePushedAt)[-3:].{tags:imageTags,pushed:imagePushedAt}'
+codingworkspace-notebook/ci/smoke-image.sh contract IMAGE CW_FULL_SHA GIZMO_FULL_SHA
 ```
 
-Expect the newest image to carry `preview` + the new immutable tag together.
+It verifies the non-root runtime user, pinned Jupyter components, Bubblewrap and
+OpenCode executables, exact immutable starter checkout, source labels, and
+absence of the global direct-OpenCode credential path.
 
-**Trigger the tracker immediately** (instead of waiting ≤15 min)
+Before moving `release`, run on a compatible Docker/cluster host:
+
+```bash
+codingworkspace-notebook/ci/smoke-image.sh namespace IMAGE
+codingworkspace-notebook/ci/smoke-image.sh lifecycle IMAGE CW_FULL_SHA GIZMO_FULL_SHA
+```
+
+The lifecycle mode creates uniquely named disposable Docker volumes and covers:
+
+- fresh-home startup and successful `/livez`/`/readyz`;
+- exact-empty legacy credential-directory cleanup;
+- starter-backed project bootstrap without a network credential;
+- direct-loopback capability rejection and allowed authenticated proxy access;
+- direct denial of contents, kernel, session, terminal, Lab, and tree routes;
+- exact same-UID/pidfd preStop targeting, bounded SIGTERM, a newly published
+  shutdown checkpoint, independent primary/checkpoint SQLite quick checks, and
+  idempotent `not-running` success while Jupyter remains alive;
+- retained workspace Git state; and
+- generic diagnostic `503` (`CW-JH-STARTUP-001`) rather than proxy `504` for
+  nonempty, linked, and specially typed forbidden stale state.
+
+The Docker harness intentionally fails when its host cannot create the required
+unprivileged namespaces. A passing Docker run is still not production evidence.
+Repeat the release gates in the preview Hub using the exact ECR digest, real pod
+security context/kernel, retained EFS storage, LiteLLM pre-spawn key, preStop and
+120-second grace, culler, network rules, alerts, and backup/restore procedure.
+
+The companion Hub profile must execute the image helper directly:
+
+```yaml
+singleuser:
+  extraPodConfig:
+    terminationGracePeriodSeconds: 120
+  lifecycleHooks:
+    preStop:
+      exec:
+        command:
+          - /usr/local/sbin/codingworkspace-prestop
+```
+
+Do not replace it with a drain-only signal or a SIGTERM sent only to Jupyter.
+Simpervisor forwards parent SIGTERM to the child and then immediately exits
+without awaiting CodingWorkspace's 90-second shutdown. The helper instead
+selects the exact same-UID child with immutable process/environment evidence,
+uses a pidfd to close PID-reuse races, waits up to 105 seconds, detects a
+nonzero-exit supervisor restart, and bounds the complete hook—including both
+SQLite quick checks—to 114 seconds. No exact process is an idempotent
+`not-running` success; a present but invalid or ambiguous match fails closed.
+After signalling, success requires a new shutdown checkpoint and both SQLite
+quick checks. Its failure is a release-blocking `CW_ALERT`; prove the hook's
+`/proc`/pidfd access and timing in the real pod.
+
+The LiteLLM mint hook should inject the key's actual
+`CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH`. If the value is unavailable,
+the image deliberately passes `0` so the UI reports only process-observed lower-
+bound age. Restarting Jupyter does not reset the claimed credential age.
+
+## Normal release and promotion
+
+1. Land the CodingWorkspace changes on `main`; keep its `release` branch on the
+   last compatible rollback until the image PR is merged and reviewed.
+2. Merge the image PR. Confirm non-secret validation and the trusted immutable
+   candidate build pass. Confirm `preview` and CodingWorkspace `latest` did not
+   move.
+3. Run the namespace/lifecycle tests and resolve every scan finding or record a
+   reviewed, expiring exception.
+4. Advance CodingWorkspace `release` to the approved source commit. Within 15
+   minutes `track-cw.yml` updates `CW_REF` and dispatches the one promotion
+   build. A manual tracker run avoids the wait.
+5. Confirm the tracker and dispatched build are green; compare the release
+   artifact's exact full refs and digest to the intended commits.
+6. Stop/start a preview test server and complete the actual-Hub acceptance
+   gates. Running pods are never hot-swapped.
+7. Promote to production only by a reviewed `jhub-config` change pinning the
+   exact accepted digest.
+
+Run the tracker immediately:
 
 ```bash
 gh workflow run track-cw.yml --repo ubc/jupyter-images --ref main
 ```
 
-**Pause / resume the pipeline** (e.g. to hold a manual `CW_REF` pin)
+Build an immutable CodingWorkspace candidate without moving tags:
 
 ```bash
-gh workflow disable track-cw.yml --repo ubc/jupyter-images
-gh workflow enable  track-cw.yml --repo ubc/jupyter-images
+gh workflow run build.yml --repo ubc/jupyter-images --ref main \
+  -f publish=true \
+  -f scope=codingworkspace-notebook \
+  -f promote_codingworkspace=false
 ```
 
-**Emergency rollback of preview** (skips the pipeline; server-side retag, no
-pull needed)
+Manual promotion is intentionally possible only as an explicit trusted
+dispatch of `main`; normally use the tracker so `CW_REF` is first reconciled to
+the release branch. Before any manual `promote_codingworkspace=true`, verify the
+full `CW_REF` equals the intended CodingWorkspace `release` head and the pinned
+GizmoApp commit is the reviewed starter.
+
+## Verification
 
 ```bash
-aws ecr get-login-password --region ca-central-1 \
-  | docker login --username AWS --password-stdin 032401129069.dkr.ecr.ca-central-1.amazonaws.com
-docker buildx imagetools create \
-  -t 032401129069.dkr.ecr.ca-central-1.amazonaws.com/codingworkspace-notebook:preview \
-  032401129069.dkr.ecr.ca-central-1.amazonaws.com/codingworkspace-notebook:<last-good-immutable-tag>
+gh run list --repo ubc/jupyter-images --workflow track-cw.yml --limit 3
+gh run list --repo ubc/jupyter-images --workflow build.yml --branch main --limit 5
+aws ecr describe-images \
+  --repository-name codingworkspace-notebook \
+  --region ca-central-1 \
+  --query 'sort_by(imageDetails,&imagePushedAt)[-5:].{tags:imageTags,digest:imageDigest,pushed:imagePushedAt}'
 ```
 
-Then pause the tracker (above) or revert the CW `release` branch, or the next
-cycle re-tags `:preview` forward again. The clean rollback is a revert on
-`release` — prefer it when the ~15 min cycle is acceptable.
+Expected promotion evidence:
 
-**Promote to prod**
+- the tracker resolved a full release SHA and updated or confirmed `CW_REF`;
+- the dispatched workflow says promotion was explicitly enabled;
+- contract/SBOM/Trivy steps passed;
+- `preview` and the immutable tag resolve to the recorded digest; and
+- the full GizmoApp pin in the artifact matches `GIZMOAPP_REF`.
 
-1. `docker buildx imagetools inspect …:preview` → find the immutable tag with
-   the same digest (i.e. what preview has been running).
-2. PR to `jhub-config` setting that tag in `config-prd-keycloak.yaml`.
-3. Review + `helm upgrade` against the prod cluster. Diff repo vs live first
-   (`helm get values`) — drift has bitten twice.
+## Rollback
+
+Prefer reverting CodingWorkspace `release`; the tracker builds and promotes the
+reverted source through the same evidence-producing path. For an urgent preview
+rollback, an ECR-authorized operator may move `preview` to a previously accepted
+immutable digest, then pause the tracker or revert `release` so the next cycle
+does not move it forward again. Never rebuild an old tag or use an unrecorded
+`.dirty` local image.
+
+Production rollback is a reviewed `jhub-config` change back to a previously
+accepted immutable digest. A pod Stop/Start is required to receive a changed
+image; deleting a retained home/PVC is not a restart and is never part of this
+runbook.
 
 ## Failure modes
 
-| Symptom | Cause / action |
-|---------|----------------|
-| Tracker run green but says "No release branch" | `release` deleted/renamed in the CW repo — recreate or update `CW_BRANCH` |
-| Tracker push step fails | Race with a human push to `main`; by design it does not rebase/force — the next cron run retries cleanly |
-| Build red at the clone step | Deploy key removed/rotated on the CW repo, or secret missing — re-add key / secret |
-| Build red at `pip install` | The CW commit broke packaging; fix forward or revert on `release` |
-| Build green but `:preview` not updated | Build ran from a non-`main` branch (the retag is gated to `main`) or for another image only — check the run's "Detected changes" lines |
-| Students report old behavior | Their pod predates the release — server stop/start required; pods are never hot-swapped |
-| Fork PR shows the image skipped | Expected: secrets aren't available to fork PRs; the image is skipped so the PR stays green |
+| Symptom | Meaning / action |
+| --- | --- |
+| Fork PR asks for AWS or fails because a secret is absent | Workflow regression: PR validation must not enter the trusted publish job |
+| Static validation rejects an Action | Resolve the desired upstream release and review/pin its full commit; do not switch to a floating tag |
+| Tracker cannot clone CodingWorkspace | Check the read-only deploy key, the pinned GitHub host key, and repository access; never weaken strict host checking |
+| Tracker push loses a race | No force/rebase is used; the next scheduled run retries from fresh `main` |
+| Image-source merge succeeds but preview does not change | Expected; ordinary merges publish immutable candidates only |
+| Tracker unchanged on schedule and no build runs | Expected; unchanged scheduled runs do not rebuild. A manual tracker run explicitly rebuilds/promotes |
+| Immutable build succeeds but no moving CodingWorkspace tag changes | Expected unless the trusted dispatch set `promote_codingworkspace=true` |
+| SBOM/Trivy step cannot generate evidence | Publication stops; repair scanner/network/tooling rather than publishing without evidence |
+| Trivy report contains findings but workflow is green | Generation succeeded; human triage is still required before promotion |
+| Lifecycle smoke fails only at Bubblewrap | The test host/pod cannot provide the required namespace boundary; production remains blocked until the real image/profile probe passes |
+| Startup returns diagnostic 503 | Inspect the credential-safe `CW_ALERT`/reference; repair config or quarantine forbidden stale state. Do not enable the forbidden feature or delete ambiguous data automatically |
+| Students see old behavior | Their server predates the image. Use Hub Control Panel Stop/Start; do not delete the PVC |
 
-## Maintenance notes
+## Maintenance cadence
 
-- The pipeline operates entirely on `main` (the `codingworkspace-notebook`
-  feature branch was merged and retired). `JI_BRANCH`, the `track-cw.yml`
-  checkout, and the `build.yml` `:preview` retag gate are all `main`.
-- Optional upgrades, deliberately not built yet: `repository_dispatch` from
-  CW pushes for instant tracking (needs a dispatch credential in the CW
-  repo; cron remains the fallback), and a re-pull DaemonSet if the
-  once-per-node ~2.8 GB pull after each release becomes annoying.
-- Local fallback build: `build-and-push.sh` (see `README.md`) — for testing
-  uncommitted CW source; never deploy its `.dirty` tags.
+At least before each course release and monthly while deployed:
+
+1. review the base digest and Jupyter component assertions;
+2. review OpenCode/Node/Bubblewrap and every Action/scanner pin;
+3. regenerate and triage the SBOM/vulnerability report;
+4. run contract, namespace, lifecycle, and preview-Hub acceptance tests;
+5. verify a previous immutable digest can be restored; and
+6. retain the exact release evidence with the course operations record.

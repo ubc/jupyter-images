@@ -2,26 +2,13 @@ name: Track CodingWorkspace release
 
 on:
   schedule:
-    - cron: "7,22,37,52 * * * *" # every 15 min, offset from top-of-hour congestion
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
-# Auto-bumps codingworkspace-notebook/CW_REF (on main) to the head of the
-# CodingWorkspace `release` branch, then dispatches build.yml. Merging to
-# `release` in the CodingWorkspace repo is therefore the "deploy to preview"
-# action: the resulting image is pushed as an immutable <ji sha>-cw<cw sha>
-# tag plus the moving :preview tag the preview hub follows. Prod deployments
-# instead pin an immutable tag in jhub-config (the gate).
-#
-# Two GitHub quirks shape this file:
-# - Scheduled workflows only run from the DEFAULT branch (main), which is where
-#   this file and the image sources both live.
-# - Pushes made with GITHUB_TOKEN never trigger `push` workflows (recursion
-#   guard), so the bump commit alone would not build; we dispatch build.yml
-#   explicitly (workflow_dispatch is exempt from the guard).
-
-permissions:
-  contents: write
-  actions: write
+# This trusted workflow is the only automatic path that moves the
+# codingworkspace-notebook :preview and :latest tags. A normal image-source
+# merge may publish an immutable candidate but cannot alter the Hub target.
+permissions: {}
 
 concurrency:
   group: track-cw
@@ -29,7 +16,13 @@ concurrency:
 
 jobs:
   bump:
+    # workflow_dispatch can select a ref. Never grant the source/deployment
+    # secret or a write token to a workflow definition outside reviewed main.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
     env:
       JI_BRANCH: main
       CW_REPO: git@github.com:kevinlb1/CodingWorkspace.git
@@ -37,47 +30,67 @@ jobs:
       CW_REF_FILE: codingworkspace-notebook/CW_REF
     steps:
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
 
-      - name: Resolve CodingWorkspace release head
+      - name: Resolve exact CodingWorkspace release head
         id: cw
         env:
           CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
         run: |
-          keyfile="$RUNNER_TEMP/cw_key"
-          printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
-          chmod 600 "$keyfile"
-          head=$(GIT_SSH_COMMAND="ssh -i $keyfile -o StrictHostKeyChecking=accept-new" \
-            git ls-remote "$CW_REPO" "refs/heads/$CW_BRANCH" | cut -f1)
-          rm -f "$keyfile"
-          if [ -z "$head" ]; then
-            echo "No $CW_BRANCH branch on the CodingWorkspace remote; nothing to track."
+          set -euo pipefail
+          if [ -z "${CW_DEPLOY_KEY:-}" ]; then
+            echo "CW_DEPLOY_KEY is required by the trusted release tracker." >&2
+            exit 1
           fi
-          echo "head=$head" >> "$GITHUB_OUTPUT"
+          keyfile="$RUNNER_TEMP/cw_key"
+          known_hosts="$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts"
+          cleanup() {
+            rm -f "$keyfile"
+          }
+          trap cleanup EXIT
+          umask 077
+          printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
+          head=$(GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
+            git ls-remote "$CW_REPO" "refs/heads/$CW_BRANCH" | cut -f1)
+          if [[ ! "$head" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "No full-SHA $CW_BRANCH head was returned by CodingWorkspace." >&2
+            exit 1
+          fi
+          printf 'head=%s\n' "$head" >> "$GITHUB_OUTPUT"
 
-      - name: Bump CW_REF and dispatch the build
-        if: steps.cw.outputs.head != ''
+      - name: Bump CW_REF when release moved
+        id: bump
         env:
-          GH_TOKEN: ${{ github.token }}
           NEW_REF: ${{ steps.cw.outputs.head }}
         run: |
-          current=$(grep -Ev '^[[:space:]]*(#|$)' "$CW_REF_FILE" | head -n1 | tr -d '[:space:]')
+          set -euo pipefail
+          current=$(python3 codingworkspace-notebook/ci/read_pin.py "$CW_REF_FILE")
           if [ "$current" = "$NEW_REF" ]; then
-            echo "CW_REF already at $NEW_REF; nothing to do."
+            printf 'changed=false\n' >> "$GITHUB_OUTPUT"
+            echo "CW_REF already at $NEW_REF."
             exit 0
           fi
-          sed -i "s|^${current}\$|${NEW_REF}|" "$CW_REF_FILE"
-          # Fail loudly if the swap missed (e.g. CW_REF hand-edited to an
-          # unexpected shape) rather than committing a no-op.
-          grep -q "^${NEW_REF}\$" "$CW_REF_FILE"
+          python3 codingworkspace-notebook/ci/update_pin.py "$CW_REF_FILE" "$NEW_REF"
+          test "$(python3 codingworkspace-notebook/ci/read_pin.py "$CW_REF_FILE")" = "$NEW_REF"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$CW_REF_FILE"
           git commit -m "auto: track CodingWorkspace $CW_BRANCH @ ${NEW_REF:0:7}"
-          # If a human pushed main meanwhile, this fails and the next scheduled
-          # run retries from scratch - no force, no rebase.
           git push origin "HEAD:$JI_BRANCH"
-          gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref "$JI_BRANCH"
-          echo "Bumped ${current:0:7} -> ${NEW_REF:0:7}; dispatched build.yml on $JI_BRANCH."
+          printf 'changed=true\n' >> "$GITHUB_OUTPUT"
+
+      - name: Build and promote the approved release
+        if: steps.bump.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run build.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$JI_BRANCH" \
+            -f publish=true \
+            -f scope=codingworkspace-notebook \
+            -f promote_codingworkspace=true
+          echo "Dispatched immutable build plus explicit preview/latest promotion."
