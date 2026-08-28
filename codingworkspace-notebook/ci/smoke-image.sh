@@ -60,6 +60,8 @@ PY
       test -z "${OPENCODE_CONFIG:-}"
       test "${JUPYTERHUB_SINGLEUSER_APP:-}" = "jupyter_server.serverapp.ServerApp"
       test "${JUPYTER_RUNTIME_DIR:-}" = /tmp/codingworkspace-jupyter-runtime
+      test "${PYTHONNOUSERSITE:-}" = 1
+      test "${PYTHONSAFEPATH:-}" = 1
       test -d "$JUPYTER_RUNTIME_DIR"
       test "$(stat -c %u "$JUPYTER_RUNTIME_DIR")" = "$(id -u)"
       test "$(stat -c %g "$JUPYTER_RUNTIME_DIR")" = "$(id -g)"
@@ -247,12 +249,21 @@ for path in (run_dir / "CodingWorkspace.sqlite3", checkpoints[-1]):
 }
 
 # Fresh home, exact-empty legacy cleanup, authenticated proxy, denied direct
-# backend access, denied Jupyter APIs, starter creation, graceful SIGTERM.
-prepare_home "$fresh_volume" 'install -d -m 0700 /home/jovyan/cw/run /home/jovyan/cw/run/github-credentials /home/jovyan/cw/run/opencode-auth'
+# backend access, denied Jupyter APIs, Python user-site shadow resistance,
+# starter creation, and graceful SIGTERM.
+prepare_home "$fresh_volume" '
+  install -d -m 0700 /home/jovyan/cw/run /home/jovyan/cw/run/github-credentials /home/jovyan/cw/run/opencode-auth
+  install -d -m 0700 /home/jovyan/.local/lib/python3.13/site-packages/codingworkspace
+  printf "%s\n" \
+    "from pathlib import Path" \
+    "Path(\"/home/jovyan/cw-shadow-imported\").write_text(\"unsafe\")" \
+    > /home/jovyan/.local/lib/python3.13/site-packages/codingworkspace/__init__.py
+'
 fresh_container="cw-smoke-fresh-$suffix"
 start_server "$fresh_volume" "$fresh_container"
 wait_for_code "$fresh_container" "${BASE_URL}codingworkspace/livez" 200
 wait_for_code "$fresh_container" "${BASE_URL}codingworkspace/readyz" 200
+docker exec "$fresh_container" test ! -e /home/jovyan/cw-shadow-imported
 
 direct_code=$(docker exec "$fresh_container" curl -sS -o /tmp/cw-smoke-direct -w '%{http_code}' \
   "http://127.0.0.1:8768${BASE_URL}codingworkspace/api/bootstrap")
@@ -284,6 +295,7 @@ docker stop --time 15 "$fresh_container" >/dev/null
 retained_container="cw-smoke-retained-$suffix"
 start_server "$fresh_volume" "$retained_container"
 wait_for_code "$retained_container" "${BASE_URL}codingworkspace/readyz" 200
+docker exec "$retained_container" test ! -e /home/jovyan/cw-shadow-imported
 docker exec "$retained_container" find /home/jovyan/cw/workspaces -type d -name .git -print -quit | grep -q .
 run_verified_prestop "$retained_container"
 docker stop --time 15 "$retained_container" >/dev/null

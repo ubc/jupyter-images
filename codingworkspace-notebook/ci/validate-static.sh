@@ -66,14 +66,20 @@ dockerfile=codingworkspace-notebook/Dockerfile
 rg -q '^ARG BASE_CONTAINER=.*@sha256:[0-9a-f]{64}$' "$dockerfile" \
   || fail "the base notebook image is not pinned by digest"
 rg -q 'hub-5\.5\.0' "$dockerfile" || fail "the base image is not tied to JupyterHub 5.5.0"
-rg -q 'jupyter-server-proxy==4\.5\.0' "$dockerfile" \
+rg -q '^jupyter-server-proxy==4\.5\.0' codingworkspace-notebook/proxy-requirements.txt \
   || fail "jupyter-server-proxy is not pinned to 4.5.0"
+rg -q -- '--no-deps --only-binary=:all: --require-hashes' "$dockerfile" \
+  || fail "the proxy Python runtime is not installed in hash-required binary-only mode"
+rg -q 'proxy-requirements\.txt' "$dockerfile" \
+  || fail "the hash-locked proxy requirement set is not used"
 rg -q 'jupyterhub.*5\.5\.0|5\.5\.0.*jupyterhub' "$dockerfile" \
   || fail "JupyterHub Python 5.5.0 is not asserted by the image build"
 rg -q 'JUPYTERHUB_SINGLEUSER_APP=jupyter_server\.serverapp\.ServerApp' "$dockerfile" \
   || fail "the single-user application is not pinned to plain Jupyter Server"
 rg -q 'JUPYTER_RUNTIME_DIR=/tmp/codingworkspace-jupyter-runtime' "$dockerfile" \
   || fail "Jupyter runtime state is not fixed outside the retained home"
+rg -q 'PYTHONSAFEPATH=1' "$dockerfile" \
+  || fail "safe Python startup is not fixed in the image environment"
 rg -q 'bubblewrap' "$dockerfile" || fail "Bubblewrap is not installed"
 rg -q 'from=gizmosrc' "$dockerfile" || fail "the pinned GizmoApp build context is not used"
 rg -q '/usr/local/sbin/codingworkspace-prestop' "$dockerfile" \
@@ -89,6 +95,54 @@ if rg -n 'https://opencode\.ai/install|pip install[^#]*jupyter-server-proxy([[:s
 fi
 test ! -e codingworkspace-notebook/opencode.json \
   || fail "the global direct-OpenCode pod-key configuration must be removed"
+
+python3 - <<'PY'
+from pathlib import Path
+import re
+
+path = Path("codingworkspace-notebook/proxy-requirements.txt")
+physical = path.read_text(encoding="utf-8").splitlines()
+logical: list[str] = []
+buffer = ""
+for raw in physical:
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    buffer = f"{buffer} {stripped}".strip()
+    if buffer.endswith("\\"):
+        buffer = buffer[:-1].rstrip()
+        continue
+    logical.append(buffer)
+    buffer = ""
+if buffer:
+    raise SystemExit("unterminated continuation in proxy-requirements.txt")
+
+expected = {
+    "aiohappyeyeballs": "2.7.1",
+    "aiosignal": "1.4.0",
+    "attrs": "26.1.0",
+    "frozenlist": "1.8.0",
+    "multidict": "6.7.1",
+    "propcache": "0.5.2",
+    "idna": "3.19",
+    "yarl": "1.24.5",
+    "aiohttp": "3.14.3",
+    "jupyter-server-proxy": "4.5.0",
+    "simpervisor": "1.0.0",
+}
+seen: dict[str, str] = {}
+for requirement in logical:
+    first, *rest = requirement.split()
+    if "==" not in first:
+        raise SystemExit(f"unversioned proxy requirement: {first}")
+    name, version = first.split("==", 1)
+    hashes = [item.removeprefix("--hash=sha256:") for item in rest]
+    if not hashes or any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in hashes):
+        raise SystemExit(f"missing/malformed wheel hash for {name}")
+    seen[name] = version
+if seen != expected:
+    raise SystemExit(f"proxy requirement set mismatch: expected {expected}, got {seen}")
+PY
 
 prestop=codingworkspace-notebook/codingworkspace_prestop.py
 for required in \
@@ -141,6 +195,15 @@ for required in \
   CODINGWORKSPACE_SQLITE_JOURNAL_MODE \
   CODINGWORKSPACE_SQLITE_SYNCHRONOUS; do
   grep -Fq "$required" <<<"$config_text" || fail "server config is missing $required"
+done
+for required in \
+  '"PYTHONNOUSERSITE": "1"' \
+  '"PYTHONSAFEPATH": "1"' \
+  '"/opt/conda/bin/python",' \
+  '"-I",' \
+  '"-P",'; do
+  grep -Fq "$required" <<<"$config_text" \
+    || fail "the isolated Python child contract is missing $required"
 done
 
 for required in \

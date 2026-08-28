@@ -59,8 +59,9 @@ manually dispatch promotion merely to test an image PR.
    `workflow_dispatch` of `main` with `publish=true`. It resolves exact sources,
    publishes one immutable ECR image with BuildKit provenance/SBOM attestations,
    resolves and pulls that exact ECR digest, and runs the CodingWorkspace smoke,
-   Syft, and Trivy against the pulled digest. Moving tags occur only after every
-   check succeeds. A rejected immutable candidate may remain in ECR for
+   Syft, a complete Trivy report, and the automatic fixable-CRITICAL Trivy gate
+   against the pulled digest. Moving tags occur only after every check succeeds.
+   A rejected immutable candidate may remain in ECR for
    diagnosis, but it is never promoted.
 
 For non-CodingWorkspace images, a trusted `main` publication retains the
@@ -75,6 +76,16 @@ existing behavior of moving `latest`. For `codingworkspace-notebook`, both
 `ci/validate_ci_policy.py` regression-tests these conditions and the tracker
 dispatch. Branch protection on `main` and required validation remain an
 administrator setting outside this repository.
+
+Both credential-bearing jobs name the `codingworkspace-publication` GitHub
+environment. Configure that environment to allow deployments only from `main`,
+move `CW_DEPLOY_KEY` into it, and delete every repository-level copy. The AWS
+role trust policy must independently require the exact OIDC subject
+`repo:ubc/jupyter-images:environment:codingworkspace-publication` and intended
+audience. GitHub environment jobs use the environment rather than the ref in
+`sub`; the environment's deployment-branch rule is therefore what binds the
+role to main. These are release prerequisites: a contributor can edit an `if`
+condition in branch YAML.
 
 ## Immutable source resolution
 
@@ -100,15 +111,17 @@ moving `preview`/`latest` tags and is therefore tag-mutable. CodingWorkspace use
 Tags are still pointers, not sufficient release evidence. The full GizmoApp and
 CodingWorkspace commits, jupyter-images commit, tested ECR digest, scanner
 versions, and workflow run are stored in the 90-day workflow artifact and image
-labels. Production should record/copy that evidence into the course release
-record before artifact expiry.
+labels. Ninety days is only a transfer window. Production promotion requires
+verifying `SHA256SUMS` and copying the complete bundle—including the exact
+`published-image.txt` digest—into the course's independently backed-up,
+indefinite release record. Record that destination in the production change.
 
 ## Credentials and permissions
 
 | Credential/capability | Scope | Used where |
 | --- | --- | --- |
-| `CW_DEPLOY_KEY` | Read-only deploy key for `kevinlb1/CodingWorkspace` | Trusted tracker and trusted CodingWorkspace image build only |
-| AWS GitHub OIDC role `github` | ECR repository/image publication | Trusted build job only (`id-token: write`) |
+| `CW_DEPLOY_KEY` | Read-only deploy key for `kevinlb1/CodingWorkspace` | `codingworkspace-publication` environment secret only; delete any repository-level copy |
+| AWS GitHub OIDC role `github` | ECR repository/image publication | Trusted build job only (`id-token: write`); trust exact `repo:ubc/jupyter-images:environment:codingworkspace-publication` subject, with the environment restricted to main |
 | `GITHUB_TOKEN` | `contents: write`, `actions: write` | Tracker only, to update `CW_REF` and dispatch the trusted build |
 | Public HTTPS | Read-only GizmoApp clone and fixed scanner/runtime artifacts | Trusted build |
 
@@ -139,19 +152,28 @@ digest, pulls that exact digest, and then scans it:
 
 - Syft `v1.51.1` writes SPDX JSON;
 - Trivy `v0.74.0` writes a JSON report containing all severities, fixed and
-  unfixed; and
+  unfixed;
+- a second Trivy pass blocks any fixable CRITICAL finding and retains its
+  filtered JSON result; and
 - the pushed BuildKit result includes maximum provenance plus an SBOM
   attestation.
 
 The workflow artifact also records the exact source revisions, tested ECR
-tag/digest, workflow run, and whether CodingWorkspace promotion was requested.
-Scanner-generation or smoke failure blocks moving-tag promotion, though the
-immutable candidate already pushed may remain for diagnosis. Finding a
-vulnerability does not currently fail the build (`exit-code: 0`): a release
-reviewer must triage the report, record accepted exceptions with an owner/expiry,
-and block promotion for an unacceptable finding. Converting that review into
-severity/exception policy is follow-up work; silently treating a generated
-report as a security pass is not acceptable.
+tag/digest, workflow run, whether CodingWorkspace promotion was requested,
+`published-image.txt`, and checksums for every evidence file. Scanner-generation,
+smoke, or fixable-CRITICAL failure blocks moving-tag promotion, though the
+immutable candidate already pushed may remain for diagnosis. A release reviewer
+must still triage noncritical and unfixed findings and record accepted exceptions
+with an owner and expiry; the automatic threshold is a floor, not a declaration
+that the full report is safe.
+
+The Actions artifact expires after 90 days and is not the course record. Before
+the accepted digest can enter the production Hub configuration, verify
+`SHA256SUMS`, copy the exact evidence bundle into independently backed-up
+indefinite storage, and record that storage location in the `jhub-config`
+change. The destination/service is an operator configuration item outside this
+repository; absence of a destination blocks production rather than weakening
+the gate.
 
 ## Automated and deployment smoke tests
 
@@ -176,6 +198,8 @@ The lifecycle mode creates uniquely named disposable Docker volumes and covers:
 
 - fresh-home startup and successful `/livez`/`/readyz`;
 - exact-empty legacy credential-directory cleanup;
+- adversarial retained Python user-site content that must never shadow the
+  trusted control package;
 - starter-backed project bootstrap without a network credential;
 - direct-loopback capability rejection and allowed authenticated proxy access;
 - direct denial of contents, kernel, session, terminal, Lab, and tree routes;
@@ -229,8 +253,9 @@ bound age. Restarting Jupyter does not reset the claimed credential age.
 2. Merge the image PR. Confirm non-secret validation and the trusted immutable
    candidate build pass. Confirm `preview` and CodingWorkspace `latest` did not
    move.
-3. Run the namespace/lifecycle tests and resolve every scan finding or record a
-   reviewed, expiring exception.
+3. Run the namespace/lifecycle tests. The automated gate must show no fixable
+   CRITICAL finding; resolve other findings or record a reviewed, expiring
+   exception.
 4. Advance CodingWorkspace `release` to the approved source commit. Within 15
    minutes `track-cw.yml` updates `CW_REF` and dispatches the one promotion
    build. A manual tracker run avoids the wait.
@@ -238,7 +263,9 @@ bound age. Restarting Jupyter does not reset the claimed credential age.
    artifact's exact full refs and digest to the intended commits.
 6. Stop/start a preview test server and complete the actual-Hub acceptance
    gates. Running pods are never hot-swapped.
-7. Promote to production only by a reviewed `jhub-config` change pinning the
+7. Verify `SHA256SUMS` and copy the exact evidence bundle into the independent,
+   indefinite course release record. Record its location in the change.
+8. Promote to production only by a reviewed `jhub-config` change pinning the
    exact accepted digest.
 
 Run the tracker immediately:
@@ -278,6 +305,8 @@ Expected promotion evidence:
 - the tracker resolved a full release SHA and updated or confirmed `CW_REF`;
 - the dispatched workflow says promotion was explicitly enabled;
 - contract/SBOM/Trivy steps passed;
+- `SHA256SUMS` validates the all-severity report, gate report, SBOM, release
+  metadata, and `published-image.txt`;
 - `preview` and the immutable tag resolve to the recorded digest; and
 - the full GizmoApp pin in the artifact matches `GIZMOAPP_REF`.
 
@@ -287,8 +316,8 @@ Prefer reverting CodingWorkspace `release`; the tracker builds and promotes the
 reverted source through the same evidence-producing path. For an urgent preview
 rollback, an ECR-authorized operator may move `preview` to a previously accepted
 immutable digest, then pause the tracker or revert `release` so the next cycle
-does not move it forward again. Never rebuild an old tag or use an unrecorded
-`.dirty` local image.
+does not move it forward again. Never rebuild an old tag or use an image without
+checksummed release evidence.
 
 Production rollback is a reviewed `jhub-config` change back to a previously
 accepted immutable digest. A pod Stop/Start is required to receive a changed
@@ -307,7 +336,9 @@ runbook.
 | Tracker unchanged on schedule and no build runs | Expected; unchanged scheduled runs do not rebuild. A manual tracker run explicitly rebuilds/promotes |
 | Immutable build succeeds but no moving CodingWorkspace tag changes | Expected unless the trusted dispatch set `promote_codingworkspace=true` |
 | SBOM/Trivy step cannot generate evidence | Publication stops; repair scanner/network/tooling rather than publishing without evidence |
-| Trivy report contains findings but workflow is green | Generation succeeded; human triage is still required before promotion |
+| Fixable CRITICAL Trivy gate fails | Candidate remains unpromoted. Patch the image or document a deliberately reviewed policy change; do not disable the complete report |
+| Trivy report contains noncritical or unfixed findings but workflow is green | The automatic floor passed; human triage is still required before production |
+| Evidence has not reached the independent release record | Stop production promotion. Verify `SHA256SUMS`, transfer the exact bundle, and record its indefinite-storage location; the 90-day artifact is only a handoff window |
 | Lifecycle smoke fails only at Bubblewrap | The test host/pod cannot provide the required namespace boundary; production remains blocked until the real image/profile probe passes |
 | Startup returns diagnostic 503 | Inspect the credential-safe `CW_ALERT`/reference; repair config or quarantine forbidden stale state. Do not enable the forbidden feature or delete ambiguous data automatically |
 | Students see old behavior | Their server predates the image. Use Hub Control Panel Stop/Start; do not delete the PVC |
@@ -321,4 +352,5 @@ At least before each course release and monthly while deployed:
 3. regenerate and triage the SBOM/vulnerability report;
 4. run contract, namespace, lifecycle, and preview-Hub acceptance tests;
 5. verify a previous immutable digest can be restored; and
-6. retain the exact release evidence with the course operations record.
+6. retain the checksummed release evidence in the independently backed-up,
+   indefinite course operations record.

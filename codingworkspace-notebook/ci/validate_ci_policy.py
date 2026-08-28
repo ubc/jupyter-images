@@ -10,6 +10,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
 TRACK = (ROOT / ".github/workflows/track-cw.yml").read_text(encoding="utf-8")
+LOCAL_PUBLISH = (ROOT / "codingworkspace-notebook/build-and-push.sh").read_text(
+    encoding="utf-8"
+)
+LOCAL_SCAN = (ROOT / "codingworkspace-notebook/ci/scan-local-image.sh").read_text(
+    encoding="utf-8"
+)
 
 EXPECTED_ACTIONS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -46,6 +52,7 @@ if not publish_gate:
     raise SystemExit("publish job gate is missing")
 gate = publish_gate.group(0)
 for required in (
+    "github.repository == 'ubc/jupyter-images'",
     "github.ref == 'refs/heads/main'",
     "github.event_name == 'push'",
     "github.event_name == 'workflow_dispatch'",
@@ -53,6 +60,9 @@ for required in (
 ):
     if required not in gate:
         raise SystemExit(f"publish job gate is missing {required}")
+publish_job = re.search(r"(?ms)^  build-scan-publish:.*\Z", BUILD)
+if not publish_job or "environment: codingworkspace-publication" not in publish_job.group(0):
+    raise SystemExit("publication is not bound to the protected publication environment")
 
 ordinary_latest = step(BUILD, "Move ordinary latest tag")
 if "matrix.image != 'codingworkspace-notebook'" not in ordinary_latest:
@@ -79,8 +89,16 @@ for required in (
         raise SystemExit(f"trusted tracker dispatch is missing {required}")
 
 tracker_job = re.search(r"(?ms)^  bump:.*?^    runs-on:", TRACK)
-if not tracker_job or "github.ref == 'refs/heads/main'" not in tracker_job.group(0):
+if not tracker_job or any(
+    required not in tracker_job.group(0)
+    for required in (
+        "github.repository == 'ubc/jupyter-images'",
+        "github.ref == 'refs/heads/main'",
+    )
+):
     raise SystemExit("release tracker is not restricted to its reviewed main definition")
+if "environment: codingworkspace-publication" not in TRACK:
+    raise SystemExit("release tracker is not bound to the protected publication environment")
 if not re.search(
     r"(?ms)^permissions: \{\}\s*$.*?^  bump:.*?^    permissions:\s*$"
     r".*?^      contents: write\s*$.*?^      actions: write\s*$",
@@ -93,6 +111,7 @@ ordered_steps = (
     "Run CodingWorkspace image contract smoke",
     "Generate SPDX SBOM",
     "Generate vulnerability report",
+    "Enforce fixable CRITICAL vulnerability policy",
     "Record release evidence",
     "Upload build, SBOM, and vulnerability evidence",
     "Promote approved CodingWorkspace release",
@@ -127,7 +146,11 @@ for required in (
     "contract_smoke_result",
     "sbom_result",
     "vulnerability_scan_result",
+    "vulnerability_gate_result",
     "codingworkspace_promotion_requested",
+    "published-image.txt",
+    "SHA256SUMS",
+    "independent_release_record_required_before_production=true",
 ):
     if required not in evidence:
         raise SystemExit(f"release evidence is missing {required}")
@@ -135,6 +158,18 @@ upload = step(BUILD, "Upload build, SBOM, and vulnerability evidence")
 for required in ("github.run_id", "github.run_attempt", "if: always()"):
     if required not in upload:
         raise SystemExit(f"failure/rerun evidence handling is missing {required}")
+vulnerability_report = step(BUILD, "Generate vulnerability report")
+for required in (
+    "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
+    "ignore-unfixed: false",
+    "exit-code: 0",
+):
+    if required not in vulnerability_report:
+        raise SystemExit(f"all-severity vulnerability evidence is missing {required}")
+vulnerability_gate = step(BUILD, "Enforce fixable CRITICAL vulnerability policy")
+for required in ("severity: CRITICAL", "ignore-unfixed: true", "exit-code: 1"):
+    if required not in vulnerability_gate:
+        raise SystemExit(f"fixable-CRITICAL gate is missing {required}")
 summary = step(BUILD, "Summarize verified moving tags")
 for required in (
     "if: always()",
@@ -145,5 +180,35 @@ for required in (
 ):
     if required not in summary:
         raise SystemExit(f"verified promotion summary is missing {required}")
+
+for input_name in ("jupyter-images", "CodingWorkspace", "GizmoApp"):
+    if f"check_tracked_clean {input_name}" not in LOCAL_PUBLISH:
+        raise SystemExit(f"local publisher does not reject tracked {input_name} changes")
+ordered_local = (
+    "docker buildx build",
+    '"${SCRIPT_DIR}/ci/smoke-image.sh" contract',
+    '"${SCRIPT_DIR}/ci/scan-local-image.sh"',
+    'docker push "$IMAGE"',
+    "published-image.txt",
+)
+local_positions = [LOCAL_PUBLISH.find(item) for item in ordered_local]
+if any(position < 0 for position in local_positions) or local_positions != sorted(
+    local_positions
+):
+    raise SystemExit("local publisher does not build/load/smoke/scan/push/record in order")
+if "--load" not in LOCAL_PUBLISH or "--push" in LOCAL_PUBLISH:
+    raise SystemExit("local publisher must load and gate the image before an explicit push")
+for required in (
+    "trivy_version=0.74.0",
+    "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
+    "b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5",
+    "--severity CRITICAL",
+    "--ignore-unfixed",
+    "--exit-code 1",
+    "trivy-all.json",
+    "SHA256SUMS",
+):
+    if required not in LOCAL_SCAN:
+        raise SystemExit(f"local image scan gate is missing {required}")
 
 print("CI trust-boundary policy validation passed.")

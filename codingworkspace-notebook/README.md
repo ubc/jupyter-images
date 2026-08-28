@@ -40,6 +40,9 @@ Jupyter configuration and its runtime files do not come from the retained home.
 The root-selected config is beneath `/opt`; cookies/server records use the
 per-container, mode-0700 `/tmp/codingworkspace-jupyter-runtime`. This prevents a
 retained `~/.jupyter` or prior runtime file from controlling the next server.
+`PYTHONNOUSERSITE=1`, `PYTHONSAFEPATH=1`, and the proxy's absolute isolated
+Python command (`-I -P`) also prevent retained `~/.local` packages or the
+working directory from shadowing the trusted CodingWorkspace installation.
 
 ## Pod shutdown hook
 
@@ -89,7 +92,9 @@ credential-free HTTPS repositories on `github.ubc.ca`.
 The build verifies the exact source SHAs after checkout. Image labels and the
 workflow's release-evidence artifact record the full CodingWorkspace and
 GizmoApp commits. Dependency versions and checksums are fixed in the Dockerfile
-and its pin files; update them only through review.
+and its pin files. The complete Python 3.13 proxy runtime is installed only from
+hash-locked binary wheels reviewed for both Linux amd64 and arm64; update the
+requirements and both architecture checks together.
 
 ## Validation and publication
 
@@ -106,11 +111,25 @@ and its pin files; update them only through review.
 - Production must pin the accepted immutable image digest in the Hub profile;
   it must never follow `preview` or `latest`.
 
+The credential-bearing jobs use the `codingworkspace-publication` environment.
+Repository administrators must restrict that environment to deployments from
+`main`, store `CW_DEPLOY_KEY` only there (removing any repository-level copy),
+and configure the AWS role to trust only the exact GitHub OIDC subject
+`repo:ubc/jupyter-images:environment:codingworkspace-publication` (plus the
+intended audience). GitHub uses the environment—not the ref—in `sub` for jobs
+that name an environment, so the environment's deployment rule enforces main.
+A branch-editable workflow `if` condition is defense in depth, not a credential
+boundary by itself.
+
 Trusted builds generate a Syft SPDX JSON SBOM, a complete Trivy vulnerability
 report, BuildKit provenance/SBOM attestations in ECR, and a release record with
-the source commits and resulting image digest. Reports are evidence for review;
-the vulnerability report is intentionally not an automatic pass/fail policy
-until the course and image operators adopt an exception/threshold process.
+the source commits and resulting image digest. A second Trivy pass automatically
+rejects any fixable CRITICAL finding while the complete all-severity,
+fixed-and-unfixed JSON report remains available for human review. The artifact
+includes `published-image.txt` plus `SHA256SUMS` and is retained for 90 days only
+as a transfer window. Before production, operations must verify the checksums
+and copy the exact bundle into the course's independently backed-up, indefinite
+release record.
 
 See [PIPELINE.md](PIPELINE.md) for credentials, promotion, rollback, and failure
 handling.
@@ -143,7 +162,8 @@ codingworkspace-notebook/ci/smoke-image.sh lifecycle IMAGE CW_FULL_SHA GIZMO_FUL
 ```
 
 The lifecycle harness covers a fresh home, exact-empty legacy credential
-directory cleanup, retained-home restart, local starter creation, Bubblewrap,
+directory cleanup, retained-home Python user-site shadow resistance and restart,
+local starter creation, Bubblewrap,
 proxy capability rejection, forbidden Jupyter routes, readiness, the exact
 preStop helper, a new shutdown checkpoint plus independent SQLite quick checks,
 missing-target refusal, and safe `CW-JH-STARTUP-001` refusal for nonempty,
@@ -170,10 +190,12 @@ codingworkspace-notebook/build-and-push.sh
 ```
 
 Both local source checkout HEADs must match `CW_REF` and `GIZMOAPP_REF` and must
-have no tracked, staged, or untracked changes. A test source must first be
+have no tracked, staged, or untracked changes. The publisher also refuses any
+tracked change in jupyter-images itself. A test source must first be
 committed and its full pin deliberately updated, so image labels never describe
-different content. The default tag contains the jupyter-images,
-CodingWorkspace, and GizmoApp short SHAs and adds `.dirty` only when the local
-jupyter-images configuration is modified. Never deploy a `.dirty` tag.
+different content. The script builds and loads locally, runs the non-root image
+contract, generates a checksummed CycloneDX SBOM and complete Trivy report,
+enforces the same fixable-CRITICAL gate, and only then authenticates to ECR and
+pushes. Its recorded `published-image.txt` names the resulting registry digest.
 `PLATFORM` must match the EKS nodes; production promotion still uses the trusted
-workflow and recorded immutable digest.
+workflow, accepted digest, and independent release-record gate.

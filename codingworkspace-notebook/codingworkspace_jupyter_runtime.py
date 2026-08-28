@@ -68,7 +68,14 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
     process = serverproxy_config.servers["codingworkspace"]
     if (
         list(process.command)
-        != ["/opt/conda/bin/python", "-m", "codingworkspace.server", "serve"]
+        != [
+            "/opt/conda/bin/python",
+            "-I",
+            "-P",
+            "-m",
+            "codingworkspace.server",
+            "serve",
+        ]
         or process.port != 8768
         or not process.absolute_url
     ):
@@ -101,6 +108,8 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
         "CODINGWORKSPACE_REPOSITORY_IMPORT_HOST": "github.ubc.ca",
         "CODINGWORKSPACE_SQLITE_JOURNAL_MODE": "DELETE",
         "CODINGWORKSPACE_SQLITE_SYNCHRONOUS": "FULL",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
     }
     overridden = sorted(
         name for name, value in required_environment.items() if environment.get(name) != value

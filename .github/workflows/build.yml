@@ -79,10 +79,16 @@ jobs:
     needs: [validate, select-images]
     if: >-
       needs.select-images.outputs.images != '[]' &&
+      github.repository == 'ubc/jupyter-images' &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' ||
        (github.event_name == 'workflow_dispatch' && inputs.publish == true))
     runs-on: ubuntu-latest
+    # Configure this environment to allow deployments only from main. Keep the
+    # deploy key only at environment scope, and restrict the AWS OIDC role to
+    # this repository's exact publication-environment subject. The environment
+    # deployment rule is what binds that subject to main.
+    environment: codingworkspace-publication
     permissions:
       contents: read
       id-token: write
@@ -255,6 +261,22 @@ jobs:
           ignore-unfixed: false
           exit-code: 0
 
+      # Keep the complete report above for review, but automatically reject a
+      # candidate with any CRITICAL finding for which a fix is available.
+      - name: Enforce fixable CRITICAL vulnerability policy
+        id: vulnerability_gate
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          format: json
+          output: evidence/${{ matrix.image }}-trivy-fixable-critical.json
+          version: v0.74.0
+          scanners: vuln
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
       - name: Record release evidence
         if: always()
         run: |
@@ -272,10 +294,24 @@ jobs:
             printf 'contract_smoke_result=%s\n' "${{ steps.contract_smoke.outcome }}"
             printf 'sbom_result=%s\n' "${{ steps.sbom.outcome }}"
             printf 'vulnerability_scan_result=%s\n' "${{ steps.vulnerability_scan.outcome }}"
+            printf 'vulnerability_gate_result=%s\n' "${{ steps.vulnerability_gate.outcome }}"
             printf 'codingworkspace_promotion_requested=%s\n' "${{ matrix.image == 'codingworkspace-notebook' && github.event_name == 'workflow_dispatch' && inputs.promote_codingworkspace == true }}"
             printf 'syft=v1.51.1\n'
             printf 'trivy=v0.74.0\n'
+            printf 'actions_artifact_retention_days=90\n'
+            printf 'independent_release_record_required_before_production=true\n'
           } > "evidence/${IMAGE_NAME}-release.txt"
+          if [[ "${IMAGE_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+             && [ -n "${ECR_REPOSITORY:-}" ]; then
+            printf '%s@%s\n' "$ECR_REPOSITORY" "$IMAGE_DIGEST" \
+              > evidence/published-image.txt
+          fi
+          (
+            cd evidence
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\0' \
+              | LC_ALL=C sort -z \
+              | xargs -0 --no-run-if-empty sha256sum > SHA256SUMS
+          )
 
       - name: Upload build, SBOM, and vulnerability evidence
         if: always()
@@ -286,8 +322,9 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      # Evidence upload is itself a release gate. No registry tag moves until
-      # the exact digest, SBOM, vulnerability report, and outcomes are durable.
+      # Evidence upload is itself a preview/latest gate. The 90-day artifact is
+      # a transfer window; production separately requires checksum verification
+      # and transfer into the course's independently backed-up release record.
       - name: Move ordinary latest tag
         if: matrix.image != 'codingworkspace-notebook'
         run: |

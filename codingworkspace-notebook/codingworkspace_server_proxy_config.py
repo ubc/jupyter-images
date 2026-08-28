@@ -56,6 +56,10 @@ cw_env = {
     "CODINGWORKSPACE_PLATFORM_PORT": "8768",
     "CODINGWORKSPACE_URL_PREFIX": "{base_url}codingworkspace",
     "JUPYTERHUB_SERVICE_PREFIX": os.environ.get("JUPYTERHUB_SERVICE_PREFIX", "/"),
+    # Retained ~/.local packages and the working directory cannot shadow the
+    # trusted installed package. The absolute child command also uses -I/-P.
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONSAFEPATH": "1",
     "CODINGWORKSPACE_ADMIN_USERS": os.environ.get("CODINGWORKSPACE_ADMIN_USERS", ""),
     # Mandatory child-process boundary for untrusted repositories.
     "CODINGWORKSPACE_ISOLATION_MODE": "bubblewrap",
@@ -137,7 +141,14 @@ c.ServerApp.quit_button = False
 
 c.ServerProxy.servers = {
     "codingworkspace": {
-        "command": ["/opt/conda/bin/python", "-m", "codingworkspace.server", "serve"],
+        "command": [
+            "/opt/conda/bin/python",
+            "-I",
+            "-P",
+            "-m",
+            "codingworkspace.server",
+            "serve",
+        ],
         "port": 8768,
         # Preserve /user/<name>/codingworkspace/... for the prefix-aware app.
         "absolute_url": True,

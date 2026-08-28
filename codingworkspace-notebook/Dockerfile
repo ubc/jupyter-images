@@ -51,7 +51,11 @@ RUN set -eux; \
 
 # CodingWorkspace handles imports. install-common.sh is intentionally omitted:
 # it adds mutable notebook/Lab/grader extensions this profile never exposes.
+# The pinned base lacks aiohttp; install the complete proxy runtime from
+# reviewed amd64/arm64 Python 3.13 wheels without dependency resolution.
 COPY codingworkspace-notebook/CW_REF /tmp/CW_REF
+COPY --chown=${NB_UID}:${NB_GID} --chmod=0444 \
+    codingworkspace-notebook/proxy-requirements.txt /tmp/proxy-requirements.txt
 USER ${NB_UID}
 RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
     set -eux; \
@@ -61,10 +65,13 @@ RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
     mkdir -p /tmp/cwbuild; \
     git -c safe.directory=/cwsrc -C /cwsrc archive --format=tar "${expected_ref}" \
         | tar -C /tmp/cwbuild -xf -; \
-    pip install --no-cache-dir "jupyter-server-proxy==4.5.0" "aiohttp==3.14.3" "simpervisor==1.0.0" "notebook==7.6.1" "jupyterlab==4.6.2" /tmp/cwbuild; \
+    pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes \
+        --requirement /tmp/proxy-requirements.txt; \
+    pip install --no-cache-dir --no-deps --no-build-isolation /tmp/cwbuild; \
     pip check; \
     python -c 'import importlib.metadata as m; assert m.version("jupyterhub") == "5.5.0"; assert m.version("jupyter-server-proxy") == "4.5.0"; assert m.version("aiohttp") == "3.14.3"; assert m.version("simpervisor") == "1.0.0"; assert m.version("notebook") == "7.6.1"; assert m.version("jupyterlab") == "4.6.2"'; \
-    rm -rf /tmp/cwbuild
+    rm -rf /tmp/cwbuild; \
+    rm -f /tmp/proxy-requirements.txt
 
 # Sanitize a full-history exact starter context through upload-pack. This
 # prevents CI checkout credentials/config from entering an image layer.
@@ -113,6 +120,7 @@ ENV JUPYTERHUB_SINGLEUSER_APP=jupyter_server.serverapp.ServerApp \
     JUPYTER_CONFIG_DIR=/opt/codingworkspace-jupyter/config \
     JUPYTER_RUNTIME_DIR=/tmp/codingworkspace-jupyter-runtime \
     PYTHONNOUSERSITE=1 \
+    PYTHONSAFEPATH=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     OPENCODE_DISABLE_AUTOUPDATE=1 \
     HOME=/home/jovyan

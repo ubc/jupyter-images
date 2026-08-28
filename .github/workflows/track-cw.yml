@@ -18,8 +18,11 @@ jobs:
   bump:
     # workflow_dispatch can select a ref. Never grant the source/deployment
     # secret or a write token to a workflow definition outside reviewed main.
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'ubc/jupyter-images' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: codingworkspace-publication
     permissions:
       contents: write
       actions: write

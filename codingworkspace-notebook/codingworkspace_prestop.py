@@ -22,6 +22,8 @@ from dataclasses import dataclass
 
 EXPECTED_COMMAND = (
     "/opt/conda/bin/python",
+    "-I",
+    "-P",
     "-m",
     "codingworkspace.server",
     "serve",
@@ -39,12 +41,15 @@ EXPECTED_CHILD_ENVIRONMENT = {
     "CODINGWORKSPACE_SHUTDOWN_TIMEOUT_SECONDS": "90",
     "CODINGWORKSPACE_SQLITE_JOURNAL_MODE": "DELETE",
     "CODINGWORKSPACE_SQLITE_SYNCHRONOUS": "FULL",
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONSAFEPATH": "1",
 }
 EXPECTED_PARENT_ENVIRONMENT = {
     "JUPYTER_CONFIG_DIR": "/opt/codingworkspace-jupyter/config",
     "JUPYTER_RUNTIME_DIR": "/tmp/codingworkspace-jupyter-runtime",
     "JUPYTERHUB_SINGLEUSER_APP": "jupyter_server.serverapp.ServerApp",
     "PYTHONNOUSERSITE": "1",
+    "PYTHONSAFEPATH": "1",
 }
 SHUTDOWN_WAIT_SECONDS = 105
 REPLACEMENT_QUIET_SECONDS = 2.0
