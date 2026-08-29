@@ -38,14 +38,76 @@ def step(text: str, name: str) -> str:
     return match.group(1)
 
 
+def job(text: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        text,
+    )
+    if not match:
+        raise SystemExit(f"workflow job is missing: {name}")
+    return match.group(1)
+
+
 for path in (ROOT / ".github/workflows").glob("*.yml"):
     text = path.read_text(encoding="utf-8")
+    if "pull_request_target" in text:
+        raise SystemExit(f"pull_request_target is forbidden in {path}")
     for owner_repo, sha in re.findall(r"uses:\s*([^@\s]+)@([0-9a-f]{40})", text):
         expected = EXPECTED_ACTIONS.get(owner_repo)
         if expected is None:
             raise SystemExit(f"unreviewed external Action in {path}: {owner_repo}@{sha}")
         if sha != expected:
             raise SystemExit(f"unexpected pin for {owner_repo}: {sha}")
+
+selection_job = job(BUILD, "select-images")
+validation_job = job(BUILD, "validate-codingworkspace")
+ordinary_job = job(BUILD, "build-and-push-ordinary")
+publish_job_text = job(BUILD, "build-scan-publish")
+
+for required in (
+    "github.event.pull_request.base.sha",
+    "--format github-output",
+    "ordinary_images",
+    "codingworkspace_images",
+    "validate_codingworkspace",
+):
+    if required not in selection_job:
+        raise SystemExit(f"image selection is missing {required}")
+
+if "needs: select-images" not in validation_job or (
+    "needs.select-images.outputs.validate_codingworkspace == 'true'"
+    not in validation_job
+):
+    raise SystemExit("CodingWorkspace validation is not selected by changed paths")
+
+# Ordinary images retain the upstream branch/tag + short-SHA/latest contract.
+# They must not inherit CW's lint, evidence, scanning, or protected environment.
+for required in (
+    "needs: select-images",
+    "needs.select-images.outputs.ordinary_images",
+    "github.repository == 'ubc/jupyter-images'",
+    "github.event_name == 'push'",
+    "github.event_name == 'workflow_dispatch'",
+    "inputs.publish == true",
+    "docker buildx build --load",
+    'tag="${GITHUB_SHA::7}"',
+    'docker push "$repository:latest"',
+):
+    if required not in ordinary_job:
+        raise SystemExit(f"ordinary image publication is missing {required}")
+for forbidden in (
+    "validate-codingworkspace",
+    "codingworkspace-publication",
+    "CW_DEPLOY_KEY",
+    "trivy-action",
+    "sbom-action",
+):
+    if forbidden in ordinary_job:
+        raise SystemExit(f"ordinary image publication unexpectedly contains {forbidden}")
+if not re.search(r'(?m)^    branches: \["\*"\]\s*$', BUILD) or not re.search(
+    r'(?m)^    tags: \["\*"\]\s*$', BUILD
+):
+    raise SystemExit("ordinary image branch/tag push triggers were not preserved")
 
 publish_gate = re.search(r"(?ms)^  build-scan-publish:.*?^    runs-on:", BUILD)
 if not publish_gate:
@@ -60,13 +122,15 @@ for required in (
 ):
     if required not in gate:
         raise SystemExit(f"publish job gate is missing {required}")
-publish_job = re.search(r"(?ms)^  build-scan-publish:.*\Z", BUILD)
-if not publish_job or "environment: codingworkspace-publication" not in publish_job.group(0):
+if "environment: codingworkspace-publication" not in publish_job_text:
     raise SystemExit("publication is not bound to the protected publication environment")
-
-ordinary_latest = step(BUILD, "Move ordinary latest tag")
-if "matrix.image != 'codingworkspace-notebook'" not in ordinary_latest:
-    raise SystemExit("an image-source merge could move CodingWorkspace latest")
+for required in (
+    "needs: [select-images, validate-codingworkspace]",
+    "needs.select-images.outputs.codingworkspace_images",
+    "fromJSON(needs.select-images.outputs.codingworkspace_images)",
+):
+    if required not in publish_job_text:
+        raise SystemExit(f"hardened publication is not CW-only: missing {required}")
 
 promotion = step(BUILD, "Promote approved CodingWorkspace release")
 for required in (
@@ -119,17 +183,17 @@ ordered_steps = (
 positions = [BUILD.find(f"      - name: {name}") for name in ordered_steps]
 if any(position < 0 for position in positions) or positions != sorted(positions):
     raise SystemExit("published-digest smoke/scan/promotion steps are missing or out of order")
-if BUILD.count("docker buildx build") != 1:
+if publish_job_text.count("docker buildx build") != 1:
     raise SystemExit("the trusted job must build/push exactly once so scans match publication")
 for required in (
     'docker pull "$ECR_REPOSITORY@$digest"',
     'docker tag "$ECR_REPOSITORY@$digest" "$LOCAL_IMAGE"',
     "printf 'IMAGE_DIGEST=%s\\n' \"$digest\" >> \"$GITHUB_ENV\"",
 ):
-    if required not in BUILD:
+    if required not in publish_job_text:
         raise SystemExit(f"published digest is not made authoritative for evidence: {required}")
 for required in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "-gz${GIZMOAPP_REF:0:7}"):
-    if required not in BUILD:
+    if required not in publish_job_text:
         raise SystemExit(f"candidate tags are not run-unique and source-identifying: {required}")
 
 for tag in ("latest", "preview"):

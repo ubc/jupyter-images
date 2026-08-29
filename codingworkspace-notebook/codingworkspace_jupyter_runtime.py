@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 import time
 from typing import Any
@@ -9,6 +10,68 @@ from typing import Any
 from jupyter_server.auth import Authorizer
 from jupyter_server_proxy.config import ServerProxy as ServerProxyConfig
 from jupyter_server_proxy.config import make_handlers
+
+
+TERMINATION_GRACE_ENV = "CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS"
+# The kubelet starts the termination grace-period clock before it invokes an
+# exec preStop hook. Keep these budgets in one trusted runtime module so the
+# Jupyter child timeout is derived from, rather than independent of, the Hub
+# profile's asserted grace period.
+KUBELET_POST_HOOK_RESERVE_SECONDS = 6
+PRESTOP_DISCOVERY_RESERVE_SECONDS = 2
+PRESTOP_PROCESS_EXIT_RESERVE_SECONDS = 2
+PRESTOP_REPLACEMENT_QUIET_SECONDS = 2
+PRESTOP_CHECKPOINT_INTEGRITY_RESERVE_SECONDS = 15
+MIN_CODINGWORKSPACE_SHUTDOWN_SECONDS = 30
+MAX_CODINGWORKSPACE_SHUTDOWN_SECONDS = 90
+
+
+def parse_termination_grace_seconds(raw_value: object) -> int:
+    """Validate the Hub-provided copy of terminationGracePeriodSeconds."""
+
+    value = str(raw_value if raw_value is not None else "")
+    if (
+        value != value.strip()
+        or not value.isascii()
+        or not value.isdecimal()
+        or len(value) > 4
+    ):
+        raise ValueError(f"{TERMINATION_GRACE_ENV} must be a positive integer")
+    seconds = int(value)
+    if value != str(seconds):
+        raise ValueError(f"{TERMINATION_GRACE_ENV} must use canonical decimal form")
+    minimum = (
+        KUBELET_POST_HOOK_RESERVE_SECONDS
+        + PRESTOP_DISCOVERY_RESERVE_SECONDS
+        + PRESTOP_PROCESS_EXIT_RESERVE_SECONDS
+        + PRESTOP_REPLACEMENT_QUIET_SECONDS
+        + PRESTOP_CHECKPOINT_INTEGRITY_RESERVE_SECONDS
+        + MIN_CODINGWORKSPACE_SHUTDOWN_SECONDS
+    )
+    if seconds < minimum:
+        raise ValueError(
+            f"{TERMINATION_GRACE_ENV} must be at least {minimum} seconds "
+            "for bounded shutdown and checkpoint verification"
+        )
+    if seconds > 3600:
+        raise ValueError(f"{TERMINATION_GRACE_ENV} must not exceed 3600 seconds")
+    return seconds
+
+
+def derive_codingworkspace_shutdown_seconds(termination_grace_seconds: int) -> int:
+    """Reserve hook/checkpoint time and return the child shutdown deadline."""
+
+    available = termination_grace_seconds - (
+        KUBELET_POST_HOOK_RESERVE_SECONDS
+        + PRESTOP_DISCOVERY_RESERVE_SECONDS
+        + PRESTOP_PROCESS_EXIT_RESERVE_SECONDS
+        + PRESTOP_REPLACEMENT_QUIET_SECONDS
+        + PRESTOP_CHECKPOINT_INTEGRITY_RESERVE_SECONDS
+    )
+    shutdown_seconds = min(MAX_CODINGWORKSPACE_SHUTDOWN_SECONDS, available)
+    if shutdown_seconds < MIN_CODINGWORKSPACE_SHUTDOWN_SECONDS:
+        raise ValueError("termination grace leaves no safe CodingWorkspace shutdown budget")
+    return shutdown_seconds
 
 
 class CodingWorkspaceOnlyAuthorizer(Authorizer):
@@ -98,6 +161,17 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
             "The named proxy must overwrite the CodingWorkspace capability header "
             "with the per-server backend token"
         )
+    try:
+        termination_grace_seconds = parse_termination_grace_seconds(
+            os.environ.get(TERMINATION_GRACE_ENV)
+        )
+        expected_shutdown_seconds = derive_codingworkspace_shutdown_seconds(
+            termination_grace_seconds
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            "The Hub termination grace assertion is missing or unsafe"
+        ) from exc
     required_environment = {
         "CODINGWORKSPACE_AUTH_MODE": "jupyterhub",
         "CODINGWORKSPACE_ISOLATION_MODE": "bubblewrap",
@@ -108,6 +182,10 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
         "CODINGWORKSPACE_REPOSITORY_IMPORT_HOST": "github.students.cs.ubc.ca",
         "CODINGWORKSPACE_SQLITE_JOURNAL_MODE": "DELETE",
         "CODINGWORKSPACE_SQLITE_SYNCHRONOUS": "FULL",
+        TERMINATION_GRACE_ENV: str(termination_grace_seconds),
+        "CODINGWORKSPACE_SHUTDOWN_TIMEOUT_SECONDS": str(
+            expected_shutdown_seconds
+        ),
         "PYTHONNOUSERSITE": "1",
         "PYTHONSAFEPATH": "1",
     }

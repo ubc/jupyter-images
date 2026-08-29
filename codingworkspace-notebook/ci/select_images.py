@@ -33,6 +33,10 @@ def image_directories() -> list[str]:
     )
 
 
+def compact_json(value: list[str]) -> str:
+    return json.dumps(value, separators=(",", ":"))
+
+
 def commit_exists(value: str) -> bool:
     if not value or value == NULL_SHA:
         return False
@@ -67,9 +71,16 @@ def main() -> int:
         choices=("changed", "codingworkspace-notebook", "all"),
         default="changed",
     )
+    parser.add_argument(
+        "--format",
+        choices=("images", "github-output"),
+        default="images",
+        help="emit the selected image JSON or all GitHub Actions job outputs",
+    )
     args = parser.parse_args()
 
     images = image_directories()
+    files: list[str] = []
     if args.scope == "all":
         selected = images
     elif args.scope == "codingworkspace-notebook":
@@ -85,7 +96,35 @@ def main() -> int:
             image for image in images if any(item.startswith(f"{image}/") for item in files)
         )
 
-    print(json.dumps(selected, separators=(",", ":")))
+    codingworkspace_images = [
+        image for image in selected if image == "codingworkspace-notebook"
+    ]
+    ordinary_images = [
+        image for image in selected if image != "codingworkspace-notebook"
+    ]
+    # Validate the hardened image when it will be built, when its source is
+    # touched, or when either workflow defining its release boundary changes.
+    # This remains a peer gate; ordinary image publication does not depend on
+    # CodingWorkspace-specific lint.
+    policy_paths = {
+        ".github/workflows/build.yml",
+        ".github/workflows/track-cw.yml",
+    }
+    validate_codingworkspace = bool(codingworkspace_images) or any(
+        item.startswith("codingworkspace-notebook/") or item in policy_paths
+        for item in files
+    )
+
+    if args.format == "github-output":
+        print(f"images={compact_json(selected)}")
+        print(f"ordinary_images={compact_json(ordinary_images)}")
+        print(f"codingworkspace_images={compact_json(codingworkspace_images)}")
+        print(
+            "validate_codingworkspace="
+            f"{'true' if validate_codingworkspace else 'false'}"
+        )
+    else:
+        print(compact_json(selected))
     return 0
 
 

@@ -11,6 +11,32 @@ fail() {
   exit 1
 }
 
+command -v grep >/dev/null 2>&1 || fail "grep is required for static validation"
+
+# A forbidden-pattern check must distinguish "no matches" (grep status 1)
+# from an execution or I/O failure.  In particular, never spell a security
+# guard as `if grep ...; then fail`, because a missing/broken scanner would
+# otherwise look exactly like a clean result.
+reject_ere_matches() {
+  local message=$1
+  local pattern=$2
+  shift 2
+  local output status
+  if output=$(grep -R -En -- "$pattern" "$@" 2>&1); then
+    printf '%s\n' "$output" >&2
+    fail "$message"
+  else
+    status=$?
+    case "$status" in
+      1) return 0 ;;
+      *)
+        printf '%s\n' "$output" >&2
+        fail "could not evaluate forbidden-pattern check: $message"
+        ;;
+    esac
+  fi
+}
+
 CW_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/CW_REF)
 GIZMOAPP_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/GIZMOAPP_REF)
 printf 'Validated full source pins: CW=%s GizmoApp=%s\n' "$CW_REF" "$GIZMOAPP_REF"
@@ -32,16 +58,16 @@ for workflow in .github/workflows/*.yml; do
   done < <(sed -nE 's/^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*([^[:space:]#]+).*/\1/p' "$workflow")
 done
 
-if rg -n 'pull_request_target' .github/workflows; then
-  fail "pull_request_target must not execute pull-request image code"
-fi
-rg -q "github.ref == 'refs/heads/main'" .github/workflows/build.yml \
+reject_ere_matches \
+  "pull_request_target must not execute pull-request image code" \
+  'pull_request_target' .github/workflows
+grep -Eq "github.ref == 'refs/heads/main'" .github/workflows/build.yml \
   || fail "trusted publication is not restricted to main"
-rg -q "inputs.publish == true" .github/workflows/build.yml \
+grep -Eq "inputs.publish == true" .github/workflows/build.yml \
   || fail "manual publication lacks an explicit publish gate"
-rg -q "inputs.promote_codingworkspace == true" .github/workflows/build.yml \
+grep -Eq "inputs.promote_codingworkspace == true" .github/workflows/build.yml \
   || fail "CodingWorkspace moving tags lack an explicit promotion gate"
-rg -q -- '-f promote_codingworkspace=true' .github/workflows/track-cw.yml \
+grep -Eq -- '-f promote_codingworkspace=true' .github/workflows/track-cw.yml \
   || fail "the release tracker does not explicitly authorize promotion"
 
 for script in codingworkspace-notebook/*.sh codingworkspace-notebook/ci/*.sh; do
@@ -63,36 +89,40 @@ test "$actual_host_fingerprint" = "$expected_host_fingerprint" \
   || fail "the pinned GitHub Ed25519 host key has an unexpected fingerprint"
 
 dockerfile=codingworkspace-notebook/Dockerfile
-rg -q '^ARG BASE_CONTAINER=.*@sha256:[0-9a-f]{64}$' "$dockerfile" \
+grep -Eq '^ARG BASE_CONTAINER=.*@sha256:[0-9a-f]{64}$' "$dockerfile" \
   || fail "the base notebook image is not pinned by digest"
-rg -q 'hub-5\.5\.0' "$dockerfile" || fail "the base image is not tied to JupyterHub 5.5.0"
-rg -q '^jupyter-server-proxy==4\.5\.0' codingworkspace-notebook/proxy-requirements.txt \
+grep -Eq 'hub-5\.5\.0' "$dockerfile" || fail "the base image is not tied to JupyterHub 5.5.0"
+grep -Eq '^jupyter-server-proxy==4\.5\.0' codingworkspace-notebook/proxy-requirements.txt \
   || fail "jupyter-server-proxy is not pinned to 4.5.0"
-rg -q -- '--no-deps --only-binary=:all: --require-hashes' "$dockerfile" \
+grep -Eq -- '--no-deps --only-binary=:all: --require-hashes' "$dockerfile" \
   || fail "the proxy Python runtime is not installed in hash-required binary-only mode"
-rg -q 'proxy-requirements\.txt' "$dockerfile" \
+grep -Eq 'proxy-requirements\.txt' "$dockerfile" \
   || fail "the hash-locked proxy requirement set is not used"
-rg -q 'jupyterhub.*5\.5\.0|5\.5\.0.*jupyterhub' "$dockerfile" \
+grep -Eq 'jupyterhub.*5\.5\.0|5\.5\.0.*jupyterhub' "$dockerfile" \
   || fail "JupyterHub Python 5.5.0 is not asserted by the image build"
-rg -q 'JUPYTERHUB_SINGLEUSER_APP=jupyter_server\.serverapp\.ServerApp' "$dockerfile" \
+grep -Eq 'JUPYTERHUB_SINGLEUSER_APP=jupyter_server\.serverapp\.ServerApp' "$dockerfile" \
   || fail "the single-user application is not pinned to plain Jupyter Server"
-rg -q 'JUPYTER_RUNTIME_DIR=/tmp/codingworkspace-jupyter-runtime' "$dockerfile" \
+grep -Eq 'JUPYTER_RUNTIME_DIR=/tmp/codingworkspace-jupyter-runtime' "$dockerfile" \
   || fail "Jupyter runtime state is not fixed outside the retained home"
-rg -q 'PYTHONSAFEPATH=1' "$dockerfile" \
+grep -Eq 'PYTHONSAFEPATH=1' "$dockerfile" \
   || fail "safe Python startup is not fixed in the image environment"
-rg -q 'bubblewrap' "$dockerfile" || fail "Bubblewrap is not installed"
-rg -q 'from=gizmosrc' "$dockerfile" || fail "the pinned GizmoApp build context is not used"
-rg -q '/usr/local/sbin/codingworkspace-prestop' "$dockerfile" \
+reject_ere_matches \
+  "the image may not default the Hub-owned pod termination grace assertion" \
+  'CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS' "$dockerfile"
+grep -Eq 'bubblewrap' "$dockerfile" || fail "Bubblewrap is not installed"
+grep -Eq 'from=gizmosrc' "$dockerfile" || fail "the pinned GizmoApp build context is not used"
+grep -Eq '/usr/local/sbin/codingworkspace-prestop' "$dockerfile" \
   || fail "the image-side preStop helper is not installed"
-rg -q 'git .* archive --format=tar' "$dockerfile" \
+grep -Eq 'git .* archive --format=tar' "$dockerfile" \
   || fail "CodingWorkspace must be installed from the pinned Git object, not working-tree contents"
-rg -q 'notebook.*7\.6\.1|7\.6\.1.*notebook' "$dockerfile" \
+grep -Eq 'notebook.*7\.6\.1|7\.6\.1.*notebook' "$dockerfile" \
   || fail "Notebook 7.6.1 is not asserted by the image build"
-rg -q 'jupyterlab.*4\.6\.2|4\.6\.2.*jupyterlab' "$dockerfile" \
+grep -Eq 'jupyterlab.*4\.6\.2|4\.6\.2.*jupyterlab' "$dockerfile" \
   || fail "JupyterLab 4.6.2 is not asserted by the image build"
-if rg -n 'https://opencode\.ai/install|pip install[^#]*jupyter-server-proxy([[:space:]\\]|$)' "$dockerfile"; then
-  fail "an unpinned OpenCode or jupyter-server-proxy installer remains"
-fi
+reject_ere_matches \
+  "an unpinned OpenCode or jupyter-server-proxy installer remains" \
+  'https://opencode\.ai/install|pip install[^#]*jupyter-server-proxy([[:space:]\\]|$)' \
+  "$dockerfile"
 test ! -e codingworkspace-notebook/opencode.json \
   || fail "the global direct-OpenCode pod-key configuration must be removed"
 
@@ -147,8 +177,9 @@ PY
 prestop=codingworkspace-notebook/codingworkspace_prestop.py
 for required in \
   'EXPECTED_COMMAND = (' \
-  'SHUTDOWN_WAIT_SECONDS = 105' \
-  'MAX_HOOK_SECONDS = 114.0' \
+  'CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS' \
+  'load_shutdown_budget()' \
+  'PRESTOP_CHECKPOINT_INTEGRITY_RESERVE_SECONDS' \
   'os.pidfd_open' \
   'signal.pidfd_send_signal(pid_descriptor, signal.SIGTERM)' \
   'status=not-running' \
@@ -156,27 +187,83 @@ for required in \
   'prestop_target_ambiguous' \
   'prestop_target_restarted' \
   'prestop_hook_deadline_exceeded' \
-  'signal.setitimer(signal.ITIMER_REAL, MAX_HOOK_SECONDS)' \
+  'signal.setitimer(signal.ITIMER_REAL, budget.hook_seconds)' \
   'prestop_shutdown_checkpoint_missing' \
+  'prestop_checkpoint_sqlite_quick_check_failed' \
+  'verify_primary_storage_best_effort' \
+  'primary_quick_check=' \
   'connection.set_progress_handler(' \
   'PRAGMA quick_check'; do
   grep -Fq "$required" "$prestop" || fail "preStop helper is missing $required"
 done
-if rg -n 'os\.kill\(' "$prestop"; then
-  fail "preStop may not use a PID-reuse-prone os.kill fallback"
-fi
+reject_ere_matches \
+  "preStop may not use a PID-reuse-prone os.kill fallback" \
+  'os\.kill\(' "$prestop"
+reject_ere_matches \
+  "preStop may not encode a fixed whole-hook deadline" \
+  'MAX_HOOK_SECONDS|SHUTDOWN_WAIT_SECONDS' "$prestop"
+
+python3 - <<'PY'
+import ast
+from pathlib import Path
+
+paths = {
+    "hook": Path("codingworkspace-notebook/codingworkspace_prestop.py"),
+    "runtime": Path("codingworkspace-notebook/codingworkspace_jupyter_runtime.py"),
+}
+constant_names = {
+    "TERMINATION_GRACE_ENV",
+    "KUBELET_POST_HOOK_RESERVE_SECONDS",
+    "PRESTOP_DISCOVERY_RESERVE_SECONDS",
+    "PRESTOP_PROCESS_EXIT_RESERVE_SECONDS",
+    "PRESTOP_REPLACEMENT_QUIET_SECONDS",
+    "PRESTOP_CHECKPOINT_INTEGRITY_RESERVE_SECONDS",
+    "MIN_CODINGWORKSPACE_SHUTDOWN_SECONDS",
+    "MAX_CODINGWORKSPACE_SHUTDOWN_SECONDS",
+}
+
+def constants(path: Path) -> dict[str, object]:
+    result: dict[str, object] = {}
+    tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if isinstance(target, ast.Name) and target.id in constant_names:
+            result[target.id] = ast.literal_eval(node.value)
+    return result
+
+seen = {name: constants(path) for name, path in paths.items()}
+for name, values in seen.items():
+    missing = sorted(constant_names - values.keys())
+    if missing:
+        raise SystemExit(f"{name} is missing shared preStop constants: {missing}")
+if seen["hook"] != seen["runtime"]:
+    raise SystemExit(
+        "preStop/runtime shutdown budget constants diverged: "
+        f"hook={seen['hook']!r} runtime={seen['runtime']!r}"
+    )
+PY
 
 server_config=codingworkspace-notebook/codingworkspace_server_proxy_config.py
 runtime_config=codingworkspace-notebook/codingworkspace_jupyter_runtime.py
+grep -Fq 'parse_termination_grace_seconds(' "$server_config" \
+  || fail "Jupyter startup does not validate the asserted pod termination grace"
+grep -Fq 'derive_codingworkspace_shutdown_seconds(' "$server_config" \
+  || fail "the CodingWorkspace child timeout is not derived from pod grace"
+reject_ere_matches \
+  "the Jupyter config may not hard-code an independent child shutdown timeout" \
+  '"CODINGWORKSPACE_SHUTDOWN_TIMEOUT_SECONDS":[[:space:]]*"[0-9]+"' \
+  "$server_config"
 grep -Fq 'raw_credential_issued_at_epoch = os.environ.get(' "$server_config" \
   || fail "model credential issuance does not preserve the operator-supplied epoch"
 grep -Fq '"CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH", "0"' "$server_config" \
   || fail "missing model credential issuance does not use the unknown-age sentinel"
 grep -Fq 'credential_issued_at_epoch != 0' "$runtime_config" \
   || fail "the runtime does not accept the unknown credential-age sentinel"
-if grep -Fq 'credential_issued_at_epoch = str(int(time.time()))' "$server_config"; then
-  fail "Jupyter restart time must not be misreported as model credential issuance"
-fi
+reject_ere_matches \
+  "Jupyter restart time must not be misreported as model credential issuance" \
+  'credential_issued_at_epoch = str\(int\(time\.time\(\)\)\)' "$server_config"
 
 config_text=$(cat codingworkspace-notebook/*.py)
 for required in \

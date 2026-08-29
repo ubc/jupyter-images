@@ -4,7 +4,8 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: ["*"]
+    tags: ["*"]
   workflow_dispatch:
     inputs:
       publish:
@@ -27,9 +28,10 @@ on:
         type: boolean
         default: false
 
-# Fork pull requests run only the non-secret validation job. AWS OIDC and the
-# private CodingWorkspace deploy key are reachable only from the publish job,
-# which is gated to reviewed main or an explicit dispatch of main.
+# Fork pull requests run only non-secret selection/validation. AWS OIDC is
+# never requested for a pull request. Ordinary images retain their existing
+# branch/tag publication behavior; the private CodingWorkspace deploy key is
+# reachable only from its main-only hardened publication job.
 permissions:
   contents: read
 
@@ -38,22 +40,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  validate:
-    name: Non-secret image validation
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Validate image configuration and CI policy
-        run: codingworkspace-notebook/ci/validate-static.sh
-
   select-images:
     name: Select image builds
-    needs: validate
     runs-on: ubuntu-latest
     outputs:
       images: ${{ steps.select.outputs.images }}
+      ordinary_images: ${{ steps.select.outputs.ordinary_images }}
+      codingworkspace_images: ${{ steps.select.outputs.codingworkspace_images }}
+      validate_codingworkspace: ${{ steps.select.outputs.validate_codingworkspace }}
     steps:
       - name: Checkout repository history
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -63,22 +57,97 @@ jobs:
       - name: Select images
         id: select
         env:
-          BEFORE_SHA: ${{ github.event.before }}
+          # pull_request has no event.before. Use its actual base commit rather
+          # than falling back to a parent of GitHub's synthetic merge commit.
+          BEFORE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           CURRENT_SHA: ${{ github.sha }}
           DISPATCH_SCOPE: ${{ inputs.scope || 'changed' }}
         run: |
-          images=$(python3 codingworkspace-notebook/ci/select_images.py \
+          set -euo pipefail
+          output_file="$RUNNER_TEMP/image-selection"
+          python3 codingworkspace-notebook/ci/select_images.py \
             --before "$BEFORE_SHA" \
             --current "$CURRENT_SHA" \
-            --scope "$DISPATCH_SCOPE")
-          printf 'images=%s\n' "$images" >> "$GITHUB_OUTPUT"
-          printf 'Selected images: %s\n' "$images"
+            --scope "$DISPATCH_SCOPE" \
+            --format github-output > "$output_file"
+          cat "$output_file"
+          cat "$output_file" >> "$GITHUB_OUTPUT"
+
+  validate-codingworkspace:
+    name: Validate CodingWorkspace image
+    needs: select-images
+    if: needs.select-images.outputs.validate_codingworkspace == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate image configuration and CI policy
+        run: codingworkspace-notebook/ci/validate-static.sh
+
+  # Keep the repository's established build/push contract for the six images
+  # not owned by CodingWorkspace: branch and tag pushes publish the short-SHA
+  # candidate and move latest, without imposing CW's SBOM/Trivy release gate.
+  build-and-push-ordinary:
+    name: Build and push ${{ matrix.image }}
+    needs: select-images
+    if: >-
+      needs.select-images.outputs.ordinary_images != '[]' &&
+      github.repository == 'ubc/jupyter-images' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish == true))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.select-images.outputs.ordinary_images) }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      IMAGE_NAME: ${{ matrix.image }}
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+
+      - name: Build and push ordinary image
+        run: |
+          set -euo pipefail
+          if [ -z "${ACCOUNT_ID:-}" ] || [ -z "${AWS_REGION:-}" ]; then
+            echo "AWS_ACCOUNT_ID and AWS_REGION must be configured for publication." >&2
+            exit 1
+          fi
+          registry="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          repository="$registry/$IMAGE_NAME"
+          tag="${GITHUB_SHA::7}"
+          aws ecr describe-repositories --repository-names "$IMAGE_NAME" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null
+          docker buildx build --load -f "$IMAGE_NAME/Dockerfile" -t "$repository:$tag" .
+          docker push "$repository:$tag"
+          docker tag "$repository:$tag" "$repository:latest"
+          docker push "$repository:latest"
 
   build-scan-publish:
-    name: Build and publish ${{ matrix.image }}
-    needs: [validate, select-images]
+    name: Build and publish hardened ${{ matrix.image }}
+    needs: [select-images, validate-codingworkspace]
     if: >-
-      needs.select-images.outputs.images != '[]' &&
+      needs.select-images.outputs.codingworkspace_images != '[]' &&
       github.repository == 'ubc/jupyter-images' &&
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' ||
@@ -95,7 +164,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ${{ fromJSON(needs.select-images.outputs.images) }}
+        image: ${{ fromJSON(needs.select-images.outputs.codingworkspace_images) }}
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -325,27 +394,6 @@ jobs:
       # Evidence upload is itself a preview/latest gate. The 90-day artifact is
       # a transfer window; production separately requires checksum verification
       # and transfer into the course's independently backed-up release record.
-      - name: Move ordinary latest tag
-        if: matrix.image != 'codingworkspace-notebook'
-        run: |
-          set -euo pipefail
-          docker buildx imagetools create --tag "$ECR_REPOSITORY:latest" "$ECR_REPOSITORY@$IMAGE_DIGEST"
-          observed=""
-          for attempt in $(seq 1 12); do
-            observed=$(aws ecr describe-images \
-              --repository-name "$IMAGE_NAME" \
-              --image-ids imageTag=latest \
-              --query 'imageDetails[0].imageDigest' \
-              --output text 2>/dev/null || true)
-            [ "$observed" = "$IMAGE_DIGEST" ] && break
-            sleep 5
-          done
-          if [ "$observed" != "$IMAGE_DIGEST" ]; then
-            echo "latest resolved to $observed, expected $IMAGE_DIGEST" >&2
-            exit 1
-          fi
-          printf 'ORDINARY_LATEST_MOVED=true\n' >> "$GITHUB_ENV"
-
       - name: Promote approved CodingWorkspace release
         if: >-
           matrix.image == 'codingworkspace-notebook' &&
@@ -399,7 +447,6 @@ jobs:
           {
             printf '### Registry promotion result\n\n'
             printf -- '- Tested digest: `%s`\n' "${IMAGE_DIGEST:-not-published}"
-            printf -- '- Ordinary latest verified: `%s`\n' "${ORDINARY_LATEST_MOVED:-false}"
             printf -- '- CodingWorkspace latest verified: `%s`\n' "${CODINGWORKSPACE_LATEST_MOVED:-false}"
             printf -- '- CodingWorkspace preview verified: `%s`\n' "${CODINGWORKSPACE_PREVIEW_MOVED:-false}"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -12,10 +12,27 @@ RUNTIME_ROOT = "/opt/codingworkspace-jupyter/runtime"
 if RUNTIME_ROOT not in sys.path:
     sys.path.insert(0, RUNTIME_ROOT)
 
-from codingworkspace_jupyter_runtime import CodingWorkspaceOnlyAuthorizer  # noqa: E402
+from codingworkspace_jupyter_runtime import (  # noqa: E402
+    TERMINATION_GRACE_ENV,
+    CodingWorkspaceOnlyAuthorizer,
+    derive_codingworkspace_shutdown_seconds,
+    parse_termination_grace_seconds,
+)
 
 
 proxy_token = secrets.token_urlsafe(48)
+try:
+    termination_grace_seconds = parse_termination_grace_seconds(
+        os.environ.get(TERMINATION_GRACE_ENV)
+    )
+    codingworkspace_shutdown_seconds = derive_codingworkspace_shutdown_seconds(
+        termination_grace_seconds
+    )
+except ValueError as exc:
+    raise RuntimeError(
+        f"The Hub profile must inject {TERMINATION_GRACE_ENV} from the same "
+        "configuration value used for the pod termination grace period"
+    ) from exc
 raw_credential_issued_at_epoch = os.environ.get(
     "CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH", "0"
 ).strip()
@@ -118,7 +135,13 @@ cw_env = {
     "CODINGWORKSPACE_MAX_WORKSPACES_PER_USER": "20",
     "CODINGWORKSPACE_MAX_USER_RUNNING_TURNS": "1",
     "CODINGWORKSPACE_MAX_USER_QUEUED_TURNS": "2",
-    "CODINGWORKSPACE_SHUTDOWN_TIMEOUT_SECONDS": "90",
+    # Derive the child deadline from the Hub's asserted pod grace period. The
+    # preStop helper independently repeats this calculation and refuses a
+    # mismatched child or parent process.
+    TERMINATION_GRACE_ENV: str(termination_grace_seconds),
+    "CODINGWORKSPACE_SHUTDOWN_TIMEOUT_SECONDS": str(
+        codingworkspace_shutdown_seconds
+    ),
 }
 
 # Preserve unrelated system entries, but explicitly defeat auto-discovery of

@@ -44,12 +44,139 @@ contract() {
       command -v opencode >/dev/null
       command -v codingworkspace >/dev/null
       python - <<"PY"
+import importlib.machinery
 import importlib.metadata as md
+import importlib.util
+import os
+import sqlite3
+import sys
+import tempfile
+import time
+from pathlib import Path
 assert md.version("jupyter-server-proxy") == "4.5.0"
 assert md.version("jupyterhub") == "5.5.0"
 assert md.version("notebook") == "7.6.1"
 assert md.version("jupyterlab") == "4.6.2"
 assert md.version("codingworkspace")
+
+sys.path.insert(0, "/opt/codingworkspace-jupyter/runtime")
+from codingworkspace_jupyter_runtime import (
+    derive_codingworkspace_shutdown_seconds,
+    parse_termination_grace_seconds,
+)
+assert parse_termination_grace_seconds("120") == 120
+assert derive_codingworkspace_shutdown_seconds(120) == 90
+assert derive_codingworkspace_shutdown_seconds(100) == 73
+for invalid in (None, "", "56", "0120", "120 ", "120.0", "3601"):
+    try:
+        parse_termination_grace_seconds(invalid)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"unsafe termination grace accepted: {invalid!r}")
+
+loader = importlib.machinery.SourceFileLoader(
+    "codingworkspace_prestop_contract", "/usr/local/sbin/codingworkspace-prestop"
+)
+spec = importlib.util.spec_from_loader(loader.name, loader)
+assert spec is not None
+prestop = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = prestop
+loader.exec_module(prestop)
+
+saved_grace = os.environ.pop(prestop.TERMINATION_GRACE_ENV, None)
+try:
+    for invalid, expected_code in (
+        (None, "prestop_termination_grace_invalid"),
+        ("nonsense", "prestop_termination_grace_invalid"),
+        ("0120", "prestop_termination_grace_invalid"),
+        ("56", "prestop_termination_grace_unsafe"),
+    ):
+        if invalid is None:
+            os.environ.pop(prestop.TERMINATION_GRACE_ENV, None)
+        else:
+            os.environ[prestop.TERMINATION_GRACE_ENV] = invalid
+        try:
+            prestop.load_shutdown_budget()
+        except prestop.PreStopFailure as exc:
+            assert exc.code == expected_code, exc.code
+        else:
+            raise AssertionError(f"unsafe helper grace accepted: {invalid!r}")
+
+    os.environ[prestop.TERMINATION_GRACE_ENV] = "120"
+    budget = prestop.load_shutdown_budget()
+    assert budget.hook_seconds == (
+        120 - prestop.KUBELET_POST_HOOK_RESERVE_SECONDS
+    )
+    assert budget.child_shutdown_seconds == 90
+    valid_child_budget = {
+        prestop.TERMINATION_GRACE_ENV: "120",
+        "CODINGWORKSPACE_SHUTDOWN_TIMEOUT_SECONDS": "90",
+    }
+    assert prestop.exact_budget_environment(
+        valid_child_budget, budget, child=True
+    )
+    for name, bad_value in (
+        (prestop.TERMINATION_GRACE_ENV, "119"),
+        ("CODINGWORKSPACE_SHUTDOWN_TIMEOUT_SECONDS", "89"),
+    ):
+        mismatched = dict(valid_child_budget)
+        mismatched[name] = bad_value
+        assert not prestop.exact_budget_environment(
+            mismatched, budget, child=True
+        )
+
+    with tempfile.TemporaryDirectory(prefix="cw-prestop-contract-") as temporary:
+        root = Path(temporary)
+        run_dir = root / "run"
+        backup_dir = run_dir / "metadata-backups"
+        backup_dir.mkdir(parents=True)
+        run_dir.chmod(0o700)
+        backup_dir.chmod(0o700)
+        state_db = run_dir / "CodingWorkspace.sqlite3"
+        connection = sqlite3.connect(state_db)
+        connection.execute("CREATE TABLE durable(value TEXT NOT NULL)")
+        connection.commit()
+        connection.close()
+        state_db.chmod(0o600)
+        corrupt_checkpoint = (
+            backup_dir
+            / "20260828T120000.000000Z-shutdown-deadbeef.sqlite3"
+        )
+        corrupt_checkpoint.write_bytes(b"not a sqlite database")
+        corrupt_checkpoint.chmod(0o600)
+        prestop.EXPECTED_RUN_DIR = str(run_dir)
+        prestop.EXPECTED_STATE_DB = str(state_db)
+        prestop.EXPECTED_BACKUP_DIR = str(backup_dir)
+        try:
+            prestop.verify_shutdown_storage(
+                set(), os.geteuid(), time.monotonic() + 5
+            )
+        except prestop.PreStopFailure as exc:
+            assert exc.code == "prestop_checkpoint_sqlite_quick_check_failed"
+        else:
+            raise AssertionError("corrupt mandatory shutdown checkpoint passed")
+
+        original_quick_check = prestop.sqlite_quick_check
+        try:
+            for warning_code in (
+                "prestop_primary_sqlite_quick_check_timeout",
+                "prestop_primary_sqlite_quick_check_failed",
+            ):
+                def fail_primary(*_args, _code=warning_code, **_kwargs):
+                    raise prestop.PreStopFailure(_code)
+
+                prestop.sqlite_quick_check = fail_primary
+                assert prestop.verify_primary_storage_best_effort(
+                    os.geteuid(), time.monotonic() + 10
+                ) == "warning"
+        finally:
+            prestop.sqlite_quick_check = original_quick_check
+finally:
+    if saved_grace is None:
+        os.environ.pop(prestop.TERMINATION_GRACE_ENV, None)
+    else:
+        os.environ[prestop.TERMINATION_GRACE_ENV] = saved_grace
 PY
       starter=/opt/codingworkspace-starters/GizmoApp
       test -d "$starter/.git"
@@ -164,6 +291,7 @@ start_server() {
     -v "$volume:/home/jovyan" \
     -e "JUPYTERHUB_USER=$USER_NAME" \
     -e "JUPYTERHUB_SERVICE_PREFIX=$BASE_URL" \
+    -e "CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS=120" \
     "$IMAGE" start-notebook.py \
       --ServerApp.base_url="$BASE_URL" \
       --IdentityProvider.token="$TOKEN" \
@@ -216,7 +344,8 @@ print(len(list(Path("/home/jovyan/cw/run/metadata-backups").glob("*-shutdown-*.s
   output=$(docker exec "$name" /usr/local/sbin/codingworkspace-prestop)
   elapsed=$(( $(date +%s) - started ))
   grep -q 'CW_PRESTOP v=1 status=ok' <<<"$output"
-  grep -q 'sqlite_quick_check=ok' <<<"$output"
+  grep -q 'checkpoint_quick_check=ok' <<<"$output"
+  grep -Eq 'primary_quick_check=(ok|warning|skipped-budget)' <<<"$output"
   test "$elapsed" -lt 115
 
   after_count=$(docker exec "$name" /opt/conda/bin/python -c '

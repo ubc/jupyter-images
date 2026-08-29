@@ -9,12 +9,17 @@ developer-facing release guide.
 
 ```text
 fork or same-repo PR
-  └─ validate: no secrets, no AWS, no image publication
+  └─ select changed images: no secrets, no AWS, no image publication
+       └─ CodingWorkspace/workflow paths only: run CW static validation
 
-reviewed jupyter-images main push
+reviewed jupyter-images main push touching CodingWorkspace
   └─ validate → build/push immutable candidate → pull exact digest
                                                   └─ image smoke + SBOM/vulnerability scan
                                                      (CodingWorkspace preview/latest stay put)
+
+ordinary-image branch/tag push
+  └─ existing short-SHA build/push → move that image's latest
+     (no CodingWorkspace lint, source key, SBOM, or Trivy policy)
 
 CodingWorkspace release branch moves
   └─ track-cw.yml (main, every 15 min or manual)
@@ -37,36 +42,49 @@ push build plus a second dispatch build. If GitHub changes that recursion
 behavior or the tracker is changed to use a PAT/App token, preserve an explicit
 duplicate-build guard.
 
-An image-source merge can therefore be reviewed and merged while
-CodingWorkspace `release` remains on a rollback commit: the merge produces an
-immutable candidate but cannot alter either moving CodingWorkspace tag. Do not
-manually dispatch promotion merely to test an image PR.
+An image-source PR must leave `CW_REF` at the current CodingWorkspace `release`
+head. Its merge may produce an immutable candidate combining the new image
+source with that released CodingWorkspace revision, but cannot alter either
+moving CodingWorkspace tag. After the image source lands, advancing
+CodingWorkspace `release` is the action that makes the tracker update `CW_REF`
+and request a promotion build. Do not pin unreleased application code in an
+image PR or manually dispatch promotion merely to test one: the pin has not
+passed the application release gate, and the next tracker run will reconcile
+it back to the actual `release` head.
 
 ## Workflow policy
 
-`build.yml` has three stages:
+`build.yml` has four separated paths:
 
-1. **Non-secret validation.** Runs for all PRs and `main` pushes with only
-   `contents: read`. It validates source-pin format, workflow/YAML/Python/shell
-   syntax, the source/promotion trust boundary, immutable Action pins, GitHub's
-   pinned SSH host key, and the expected image/config hardening. Fork PR code
-   never receives AWS OIDC permission or `CW_DEPLOY_KEY`.
-2. **Trusted selection.** Determines changed image directories. A root-level
-   shared build input rebuilds all images; docs/workflow-only changes do not
-   silently publish an image. An explicit dispatch can select changed images,
-   all images, or only `codingworkspace-notebook`.
-3. **Trusted build/publish/scan/promote.** Runs only for a push to `main`, or a
-   `workflow_dispatch` of `main` with `publish=true`. It resolves exact sources,
-   publishes one immutable ECR image with BuildKit provenance/SBOM attestations,
-   resolves and pulls that exact ECR digest, and runs the CodingWorkspace smoke,
-   Syft, a complete Trivy report, and the automatic fixable-CRITICAL Trivy gate
-   against the pulled digest. Moving tags occur only after every check succeeds.
-   A rejected immutable candidate may remain in ECR for
+1. **Non-secret selection.** Runs for every PR, branch/tag push, and dispatch
+   with only `contents: read`. It determines the changed image directories and
+   whether CodingWorkspace policy files changed. A root-level shared build
+   input selects all images; docs/workflow-only changes do not silently publish
+   an image. An explicit dispatch can select changed images, all images, or only
+   `codingworkspace-notebook`.
+2. **Path-selected CodingWorkspace validation.** Runs only when the
+   CodingWorkspace image, a shared input, or its workflow policy changes. It
+   checks source-pin format, workflow/YAML/Python/shell syntax, the
+   source/promotion trust boundary, immutable Action pins, GitHub's pinned SSH
+   host key, and expected image/config hardening. It is a peer job, not a
+   dependency of unrelated image publication. Fork PR code never receives AWS
+   OIDC permission or `CW_DEPLOY_KEY`.
+3. **Ordinary-image publication.** Preserves the repository's existing
+   branch/tag short-SHA build and `latest` movement for the six unrelated
+   images. It deliberately does not inherit CodingWorkspace lint, its protected
+   environment, source credential, SBOM, or Trivy release policy. Manual
+   publication still requires `publish=true`.
+4. **Hardened CodingWorkspace build/publish/scan/promote.** Runs only for a
+   CodingWorkspace selection on a push to `main`, or a `workflow_dispatch` of
+   `main` with `publish=true`. It resolves exact sources, publishes one
+   immutable ECR image with BuildKit provenance/SBOM attestations, resolves and
+   pulls that exact ECR digest, and runs the CodingWorkspace smoke, Syft, a
+   complete Trivy report, and the automatic fixable-CRITICAL Trivy gate against
+   the pulled digest. A rejected immutable candidate may remain in ECR for
    diagnosis, but it is never promoted.
 
-For non-CodingWorkspace images, a trusted `main` publication retains the
-existing behavior of moving `latest`. For `codingworkspace-notebook`, both
-`latest` and `preview` require all of these conditions:
+For `codingworkspace-notebook`, both `latest` and `preview` require all of these
+conditions:
 
 - the event is `workflow_dispatch`;
 - the workflow is running the reviewed `main` ref;
@@ -77,10 +95,11 @@ existing behavior of moving `latest`. For `codingworkspace-notebook`, both
 dispatch. Branch protection on `main` and required validation remain an
 administrator setting outside this repository.
 
-Both credential-bearing jobs name the `codingworkspace-publication` GitHub
-environment. Configure that environment to allow deployments only from `main`,
-move `CW_DEPLOY_KEY` into it, and delete every repository-level copy. The AWS
-role trust policy must independently require the exact OIDC subject
+Both CodingWorkspace credential-bearing jobs name the
+`codingworkspace-publication` GitHub environment. Configure that environment to
+allow deployments only from `main`, move `CW_DEPLOY_KEY` into it, and delete
+every repository-level copy. The AWS role trust policy must independently
+require the exact OIDC subject
 `repo:ubc/jupyter-images:environment:codingworkspace-publication` and intended
 audience. GitHub environment jobs use the environment rather than the ref in
 `sub`; the environment's deployment-branch rule is therefore what binds the
@@ -92,7 +111,7 @@ condition in branch YAML.
 | Input | Resolution and verification |
 | --- | --- |
 | jupyter-images | The checked-out full `GITHUB_SHA` on reviewed `main` |
-| CodingWorkspace | Exactly one lowercase 40-character SHA in `CW_REF`; private clone with `CW_DEPLOY_KEY`; detached checkout must equal that SHA |
+| CodingWorkspace | Tracker-owned lowercase 40-character SHA in `CW_REF`; on `jupyter-images` main it must equal the CodingWorkspace `release` head; private clone with `CW_DEPLOY_KEY`; detached checkout must equal that SHA |
 | GizmoApp | Exactly one lowercase 40-character SHA in `GIZMOAPP_REF`; credential-free public clone; detached checkout must equal that SHA and use SHA-1 object format |
 | Base image | Version tag plus `sha256` digest in `Dockerfile` |
 | OpenCode and other runtime tools | Fixed versions/checksums in reviewed image pin files |
@@ -204,8 +223,9 @@ The lifecycle mode creates uniquely named disposable Docker volumes and covers:
 - direct-loopback capability rejection and allowed authenticated proxy access;
 - direct denial of contents, kernel, session, terminal, Lab, and tree routes;
 - exact same-UID/pidfd preStop targeting, bounded SIGTERM, a newly published
-  shutdown checkpoint, independent primary/checkpoint SQLite quick checks, and
-  idempotent `not-running` success while Jupyter remains alive;
+  shutdown checkpoint with a mandatory full SQLite quick check, bounded
+  best-effort primary-database telemetry, and idempotent `not-running` success
+  while Jupyter remains alive;
 - retained workspace Git state; and
 - generic diagnostic `503` (`CW-JH-STARTUP-001`) rather than proxy `504` for
   nonempty, linked, and specially typed forbidden stale state.
@@ -216,30 +236,61 @@ Repeat the release gates in the preview Hub using the exact ECR digest, real pod
 security context/kernel, retained EFS storage, LiteLLM pre-spawn key, preStop and
 120-second grace, culler, network rules, alerts, and backup/restore procedure.
 
-The companion Hub profile must execute the image helper directly:
+The companion Hub profile must execute the image helper directly. Merge these
+entries into the **existing CodingWorkspace profile** rather than treating this
+fragment as a complete profile definition:
 
 ```yaml
 singleuser:
-  extraPodConfig:
-    terminationGracePeriodSeconds: 120
-  lifecycleHooks:
-    preStop:
-      exec:
-        command:
-          - /usr/local/sbin/codingworkspace-prestop
+  profileList:
+    - slug: ai100-codingworkspace
+      kubespawner_override:
+        # Preserve every other existing extra_pod_config value.
+        extra_pod_config:
+          terminationGracePeriodSeconds: 120
+        # Preserve every other existing environment value.
+        environment:
+          CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS: "120"
+        # Add preStop alongside the profile's existing postStart entry.
+        lifecycle_hooks:
+          preStop:
+            exec:
+              command:
+                - /usr/local/sbin/codingworkspace-prestop
 ```
+
+`kubespawner_override.lifecycle_hooks` replaces, rather than merges with,
+top-level `singleuser.lifecycleHooks`. Preserve the CodingWorkspace profile's
+existing `postStart` mapping as a sibling of `preStop`; setting the top-level
+hook alone silently leaves the profile's override in effect and never runs this
+helper. Likewise, merge `terminationGracePeriodSeconds` into the profile's
+existing `extra_pod_config` rather than discarding its other pod settings.
+
+`terminationGracePeriodSeconds` and
+`CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS` are one deployment
+contract and must be changed together. Kubernetes does not expose the actual
+pod grace period to the child process; the environment value is therefore the
+runtime's trusted mirror for deriving its bounded hook budget. Hub-config CI
+must compare both configured values, and preview-Hub acceptance must verify the
+rendered pod field and container environment agree before release.
 
 Do not replace it with a drain-only signal or a SIGTERM sent only to Jupyter.
 Simpervisor forwards parent SIGTERM to the child and then immediately exits
 without awaiting CodingWorkspace's 90-second shutdown. The helper instead
 selects the exact same-UID child with immutable process/environment evidence,
-uses a pidfd to close PID-reuse races, waits up to 105 seconds, detects a
-nonzero-exit supervisor restart, and bounds the complete hook—including both
-SQLite quick checks—to 114 seconds. No exact process is an idempotent
+uses a pidfd to close PID-reuse races, derives the child timeout and complete
+hook deadline from the required termination-grace environment value, and
+detects a nonzero-exit supervisor restart. No exact process is an idempotent
 `not-running` success; a present but invalid or ambiguous match fails closed.
-After signalling, success requires a new shutdown checkpoint and both SQLite
-quick checks. Its failure is a release-blocking `CW_ALERT`; prove the hook's
-`/proc`/pidfd access and timing in the real pod.
+At the configured 120 seconds, the derived budgets retain the 90-second child
+timeout, replacement-quiet interval, at least 15 seconds for a mandatory full
+quick check of the newly published shutdown checkpoint, and six seconds after
+the hook for kubelet termination. The closed primary database is redundant once
+that recovery checkpoint is verified, so its separate telemetry check uses at
+most five seconds and may warn or skip for budget without failing the hook.
+Success requires the new checkpoint and its full check, not a successful
+primary check. A mandatory-contract failure is a release-blocking `CW_ALERT`;
+prove the hook's `/proc`/pidfd access and timing in the real pod.
 
 The LiteLLM mint hook should inject the key's actual
 `CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH`. If the value is unavailable,
@@ -248,19 +299,20 @@ bound age. Restarting Jupyter does not reset the claimed credential age.
 
 ## Normal release and promotion
 
-1. Land the CodingWorkspace changes on `main`; keep its `release` branch on the
-   last compatible rollback until the image PR is merged and reviewed.
-2. Merge the image PR. Confirm non-secret validation and the trusted immutable
-   candidate build pass. Confirm `preview` and CodingWorkspace `latest` did not
-   move.
-3. Run the namespace/lifecycle tests. The automated gate must show no fixable
-   CRITICAL finding; resolve other findings or record a reviewed, expiring
-   exception.
-4. Advance CodingWorkspace `release` to the approved source commit. Within 15
+1. Land the CodingWorkspace changes on `main`; keep its `release` branch at the
+   current accepted revision. Do not change `CW_REF` in the image PR.
+2. Merge the image PR. Confirm non-secret validation and any trusted immutable
+   candidate build pass. That candidate uses the current `release` pin; confirm
+   `preview` and CodingWorkspace `latest` did not move.
+3. Advance CodingWorkspace `release` to the approved source commit. Within 15
    minutes `track-cw.yml` updates `CW_REF` and dispatches the one promotion
    build. A manual tracker run avoids the wait.
-5. Confirm the tracker and dispatched build are green; compare the release
-   artifact's exact full refs and digest to the intended commits.
+4. Confirm the tracker and dispatched build are green. Run the namespace and
+   lifecycle tests against the resulting exact digest. The automated gate must
+   show no fixable CRITICAL finding; resolve other findings or record a
+   reviewed, expiring exception.
+5. Compare the release artifact's exact full refs and digest to the intended
+   commits.
 6. Stop/start a preview test server and complete the actual-Hub acceptance
    gates. Running pods are never hot-swapped.
 7. Verify `SHA256SUMS` and copy the exact evidence bundle into the independent,
@@ -332,7 +384,7 @@ runbook.
 | Static validation rejects an Action | Resolve the desired upstream release and review/pin its full commit; do not switch to a floating tag |
 | Tracker cannot clone CodingWorkspace | Check the read-only deploy key, the pinned GitHub host key, and repository access; never weaken strict host checking |
 | Tracker push loses a race | No force/rebase is used; the next scheduled run retries from fresh `main` |
-| Image-source merge succeeds but preview does not change | Expected; ordinary merges publish immutable candidates only |
+| CodingWorkspace image-source merge succeeds but preview does not change | Expected; it may publish an immutable candidate but cannot move CodingWorkspace tags |
 | Tracker unchanged on schedule and no build runs | Expected; unchanged scheduled runs do not rebuild. A manual tracker run explicitly rebuilds/promotes |
 | Immutable build succeeds but no moving CodingWorkspace tag changes | Expected unless the trusted dispatch set `promote_codingworkspace=true` |
 | SBOM/Trivy step cannot generate evidence | Publication stops; repair scanner/network/tooling rather than publishing without evidence |
