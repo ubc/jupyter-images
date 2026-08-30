@@ -36,6 +36,24 @@ preview Hub: follows preview for new spawns
 production Hub: pins the accepted immutable digest through jhub-config review
 ```
 
+OpenCode has a separate automated source-input path. Every six hours the
+reviewed default-branch `update-opencode.yml` definition reads the official
+GitHub release API and chooses the newest non-draft, non-prerelease version
+that has been public for at least 48 hours. It requires GitHub-published
+SHA-256 digests for the amd64 baseline and arm64 archives, recomputes both
+digests, rejects unsafe archive members, and runs the CLI contracts on amd64.
+It changes only the three OpenCode values in `RUNTIME_PINS.env`, opens a
+same-repository PR, dispatches non-secret validation for that exact branch,
+merges that exact head subject to branch protection, explicitly dispatches the
+protected-`main` publication, and waits for it to finish.
+
+After that automation PR reaches `main`, the hardened job still builds the
+exact image, runs the full image contract, produces an SBOM and all-severity
+vulnerability report, and enforces the fixable-CRITICAL gate. Only then may
+that narrowly identified automation commit move `latest` and `preview`.
+Production remains an immutable digest in `jhub-config`; never point it at a
+moving tag.
+
 The tracker's `GITHUB_TOKEN` push does not trigger another push workflow, so a
 release movement results in the one explicitly dispatched image build, not a
 push build plus a second dispatch build. If GitHub changes that recursion
@@ -83,13 +101,13 @@ it back to the actual `release` head.
    the pulled digest. A rejected immutable candidate may remain in ECR for
    diagnosis, but it is never promoted.
 
-For `codingworkspace-notebook`, both `latest` and `preview` require all of these
-conditions:
-
-- the event is `workflow_dispatch`;
-- the workflow is running the reviewed `main` ref;
-- `publish=true`; and
-- `promote_codingworkspace=true`.
+For `codingworkspace-notebook`, both `latest` and `preview` require reviewed
+`main`, all image gates, and a trusted `workflow_dispatch` with `publish=true`
+and `promote_codingworkspace=true`. The OpenCode updater first waits for an
+exact-commit branch validation, merges that commit, then explicitly dispatches
+and waits for the protected-`main` publication. This explicit dispatch is
+required because a merge performed with `GITHUB_TOKEN` does not recursively
+start a push workflow.
 
 `ci/validate_ci_policy.py` regression-tests these conditions and the tracker
 dispatch. Branch protection on `main` and required validation remain an
@@ -341,6 +359,24 @@ the release branch. Before any manual `promote_codingworkspace=true`, verify the
 full `CW_REF` equals the intended CodingWorkspace `release` head and the pinned
 GizmoApp commit is the reviewed starter.
 
+## Automated OpenCode release
+
+Normally no operator action is required. The scheduled workflow opens the PR,
+waits for exact-head validation, merges through branch protection, then starts
+and waits for the hardened `main` build. A failed digest, archive, CLI, image
+contract, SBOM, or critical vulnerability gate leaves the old preview digest
+untouched. The previous immutable digest is never deleted by this workflow.
+
+Run discovery immediately:
+
+```bash
+gh workflow run update-opencode.yml --repo ubc/jupyter-images --ref main
+```
+
+If repository policy requires a human approval, that remains the only routine
+human step. Removing that requirement for this narrowly scoped bot PR is a
+repository-administrator policy choice; never merge around a failed gate.
+
 ## Verification
 
 ```bash
@@ -384,6 +420,9 @@ runbook.
 | Static validation rejects an Action | Resolve the desired upstream release and review/pin its full commit; do not switch to a floating tag |
 | Tracker cannot clone CodingWorkspace | Check the read-only deploy key, the pinned GitHub host key, and repository access; never weaken strict host checking |
 | Tracker push loses a race | No force/rebase is used; the next scheduled run retries from fresh `main` |
+| OpenCode update PR is not merged | Inspect its dispatched validation and branch-protection requirements; the next schedule revalidates and retries the exact open PR head |
+| No eligible OpenCode update is proposed | Expected while newer stable releases are inside the 48-hour soak, lack both required published digests/assets, or are not newer than the pin |
+| OpenCode automation build fails | Preview remains on the prior digest. Fix or quarantine the release; never move the tag forward around a failed gate |
 | CodingWorkspace image-source merge succeeds but preview does not change | Expected; it may publish an immutable candidate but cannot move CodingWorkspace tags |
 | Tracker unchanged on schedule and no build runs | Expected; unchanged scheduled runs do not rebuild. A manual tracker run explicitly rebuilds/promotes |
 | Immutable build succeeds but no moving CodingWorkspace tag changes | Expected unless the trusted dispatch set `promote_codingworkspace=true` |

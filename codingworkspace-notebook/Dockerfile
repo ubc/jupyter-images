@@ -7,12 +7,13 @@ FROM ${BASE_CONTAINER}
 ARG TARGETARCH
 ARG CW_REF
 ARG GIZMOAPP_REF
+ARG OPENCODE_VERSION
 LABEL course="AI100" \
       org.opencontainers.image.base.name="quay.io/jupyter/base-notebook:hub-5.5.0@sha256:e6f115af0bc688b884bec4e00523512deb808972e117797608fa1bf29931714a" \
       org.codingworkspace.source-revision="${CW_REF}" \
       org.codingworkspace.starter-revision="${GIZMOAPP_REF}" \
       org.codingworkspace.node-version="22.23.2" \
-      org.codingworkspace.opencode-version="1.18.23"
+      org.codingworkspace.opencode-version="${OPENCODE_VERSION}"
 
 USER root
 
@@ -22,7 +23,11 @@ USER root
 # CPU instruction sets. arm64 has no separate baseline release asset.
 COPY codingworkspace-notebook/RUNTIME_PINS.env /tmp/codingworkspace-runtime-pins.env
 RUN set -eux; \
+    expected_opencode_version="${OPENCODE_VERSION}"; \
     . /tmp/codingworkspace-runtime-pins.env; \
+    test "${OPENCODE_VERSION}" = "${expected_opencode_version}"; \
+    install --owner=root --group=root --mode=0444 \
+        /tmp/codingworkspace-runtime-pins.env /etc/codingworkspace-runtime-pins.env; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         "bubblewrap=${BUBBLEWRAP_APT_VERSION}" ca-certificates curl git xz-utils; \

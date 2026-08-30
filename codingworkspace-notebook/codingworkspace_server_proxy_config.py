@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
+import stat
 import sys
 import time
+from pathlib import Path
+from urllib.parse import urlparse
 
 
 RUNTIME_ROOT = "/opt/codingworkspace-jupyter/runtime"
@@ -63,6 +67,71 @@ if not allowed_model_set or default_model not in allowed_model_set:
         "CODINGWORKSPACE_ALLOWED_MODELS allowlist"
     )
 
+
+def image_runtime_pins(path: Path = Path("/etc/codingworkspace-runtime-pins.env")) -> dict[str, str]:
+    details = path.lstat()
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or details.st_uid != 0
+        or details.st_nlink != 1
+        or stat.S_IMODE(details.st_mode) != 0o444
+        or details.st_size > 16_384
+    ):
+        raise RuntimeError("The baked runtime pin manifest is unsafe")
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not re.fullmatch(r"[A-Z0-9_]+=[^\s]+", stripped):
+            raise RuntimeError("The baked runtime pin manifest is malformed")
+        name, value = stripped.split("=", 1)
+        if name in values:
+            raise RuntimeError("The baked runtime pin manifest contains a duplicate")
+        values[name] = value
+    version = values.get("OPENCODE_VERSION", "")
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise RuntimeError("The baked OpenCode version is invalid")
+    return values
+
+
+opencode_runtime_version = image_runtime_pins()["OPENCODE_VERSION"]
+course_control_url = os.environ.get("CODINGWORKSPACE_COURSE_CONTROL_URL", "").strip().rstrip("/")
+course_control_environment: dict[str, str] = {}
+if course_control_url:
+    course_control_token_file = os.environ.get(
+        "CODINGWORKSPACE_COURSE_CONTROL_TOKEN_FILE",
+        "/var/run/secrets/codingworkspace/course-control-token",
+    ).strip()
+    deployment_image_digest = os.environ.get(
+        "CODINGWORKSPACE_DEPLOYMENT_IMAGE_DIGEST", ""
+    ).strip()
+    course_control_poll_seconds = os.environ.get(
+        "CODINGWORKSPACE_COURSE_CONTROL_POLL_SECONDS", "60"
+    ).strip()
+    parsed_course_control = urlparse(course_control_url)
+    if (
+        parsed_course_control.scheme != "https"
+        or not parsed_course_control.hostname
+        or parsed_course_control.username is not None
+        or parsed_course_control.password is not None
+        or parsed_course_control.query
+        or parsed_course_control.fragment
+    ):
+        raise RuntimeError("The course-control service must use credential-free HTTPS")
+    if not course_control_token_file.startswith("/"):
+        raise RuntimeError("The course-control token path must be absolute")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", deployment_image_digest):
+        raise RuntimeError("The Hub must inject the pod's exact immutable image digest")
+    if not course_control_poll_seconds.isdecimal() or not 15 <= int(course_control_poll_seconds) <= 3600:
+        raise RuntimeError("The course-control poll interval is invalid")
+    course_control_environment = {
+        "CODINGWORKSPACE_COURSE_CONTROL_URL": course_control_url,
+        "CODINGWORKSPACE_COURSE_CONTROL_TOKEN_FILE": course_control_token_file,
+        "CODINGWORKSPACE_COURSE_CONTROL_POLL_SECONDS": course_control_poll_seconds,
+        "CODINGWORKSPACE_DEPLOYMENT_IMAGE_DIGEST": deployment_image_digest,
+    }
+
 cw_root = "/home/jovyan/cw"
 cw_run = f"{cw_root}/run"
 cw_env = {
@@ -85,6 +154,7 @@ cw_env = {
     "CODINGWORKSPACE_AGENT_BACKEND": "opencode",
     "CODINGWORKSPACE_OPENCODE_COMMAND": "/usr/local/bin/opencode",
     "CODINGWORKSPACE_ISOLATION_OPENCODE_COMMAND": "/usr/local/bin/opencode",
+    "CODINGWORKSPACE_OPENCODE_RUNTIME_VERSION": opencode_runtime_version,
     "CODINGWORKSPACE_LOCAL_AGENT_MODEL_PROXY_ENABLED": "1",
     # Remote code execution and unfinished multi-pod features are forbidden.
     "CODINGWORKSPACE_REMOTE_WORKERS_ENABLED": "0",
@@ -143,6 +213,7 @@ cw_env = {
         codingworkspace_shutdown_seconds
     ),
 }
+cw_env.update(course_control_environment)
 
 # Preserve unrelated system entries, but explicitly defeat auto-discovery of
 # every user-facing Jupyter surface and the stock arbitrary-port proxy.

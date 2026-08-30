@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Non-secret checks safe to execute on an untrusted fork pull request.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -82,6 +83,7 @@ for path in sorted(Path("codingworkspace-notebook").glob("*.py")) + sorted(
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
 PY
 python3 codingworkspace-notebook/ci/validate_ci_policy.py
+python3 codingworkspace-notebook/ci/test_update_opencode_release.py -v
 
 expected_host_fingerprint='SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
 actual_host_fingerprint=$(ssh-keygen -lf codingworkspace-notebook/ci/github_known_hosts | awk '{print $2}')
@@ -106,6 +108,14 @@ grep -Eq 'JUPYTER_RUNTIME_DIR=/tmp/codingworkspace-jupyter-runtime' "$dockerfile
   || fail "Jupyter runtime state is not fixed outside the retained home"
 grep -Eq 'PYTHONSAFEPATH=1' "$dockerfile" \
   || fail "safe Python startup is not fixed in the image environment"
+grep -Eq 'org\.codingworkspace\.opencode-version="\$\{OPENCODE_VERSION\}"' "$dockerfile" \
+  || fail "the image label does not use the reviewed OpenCode pin"
+grep -Eq '/etc/codingworkspace-runtime-pins\.env' "$dockerfile" \
+  || fail "the reviewed runtime pin manifest is not retained in the image"
+grep -Eq 'CODINGWORKSPACE_OPENCODE_RUNTIME_VERSION' codingworkspace-notebook/codingworkspace_server_proxy_config.py \
+  || fail "the pod does not publish its baked OpenCode runtime version"
+grep -Eq 'CODINGWORKSPACE_COURSE_CONTROL_URL' codingworkspace-notebook/codingworkspace_server_proxy_config.py \
+  || fail "the pod cannot connect to central course control"
 reject_ere_matches \
   "the image may not default the Hub-owned pod termination grace assertion" \
   'CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS' "$dockerfile"

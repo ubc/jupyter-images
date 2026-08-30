@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import time
 from typing import Any
@@ -197,6 +198,11 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
             "The CodingWorkspace Hub safety environment was overridden: "
             + ", ".join(overridden)
         )
+    if not re.fullmatch(
+        r"[0-9]+\.[0-9]+\.[0-9]+",
+        str(environment.get("CODINGWORKSPACE_OPENCODE_RUNTIME_VERSION") or ""),
+    ):
+        raise RuntimeError("The baked OpenCode runtime version is missing")
     try:
         credential_issued_at_epoch = int(
             environment["CODINGWORKSPACE_MODEL_CREDENTIAL_ISSUED_AT_EPOCH"]

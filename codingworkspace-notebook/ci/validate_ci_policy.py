@@ -10,6 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
 TRACK = (ROOT / ".github/workflows/track-cw.yml").read_text(encoding="utf-8")
+UPDATE_OPENCODE = (ROOT / ".github/workflows/update-opencode.yml").read_text(
+    encoding="utf-8"
+)
 LOCAL_PUBLISH = (ROOT / "codingworkspace-notebook/build-and-push.sh").read_text(
     encoding="utf-8"
 )
@@ -169,6 +172,34 @@ if not re.search(
     TRACK,
 ):
     raise SystemExit("tracker write permissions are not isolated to its main-only job")
+
+update_job = job(UPDATE_OPENCODE, "propose")
+for required in (
+    "github.repository == 'ubc/jupyter-images'",
+    "github.ref == 'refs/heads/main'",
+    "contents: write",
+    "pull-requests: write",
+    "actions: write",
+    "https://api.github.com/repos/anomalyco/opencode/releases?per_page=100",
+    "--minimum-age-hours 48",
+    "update_opencode_release.py verify",
+    "validate-static.sh",
+    "gh workflow run build.yml",
+    "publish=false",
+    "gh run watch",
+    "gh pr merge",
+    "--match-head-commit",
+    "--ref main",
+    "publish=true",
+    "promote_codingworkspace=true",
+    "mergeCommit",
+    "publication_run",
+    "gh run watch \"$publication_run\" --exit-status",
+):
+    if required not in update_job:
+        raise SystemExit(f"OpenCode update automation is missing {required}")
+if not re.search(r"(?m)^permissions: \{\}\s*$", UPDATE_OPENCODE):
+    raise SystemExit("OpenCode update workflow has broad top-level permissions")
 
 ordered_steps = (
     "Build and publish immutable candidate with provenance and BuildKit SBOM",

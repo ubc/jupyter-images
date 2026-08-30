@@ -95,6 +95,7 @@ if [ "$tracked_dirty" -ne 0 ]; then
 fi
 pinned_cw_ref="$(python3 "${SCRIPT_DIR}/ci/read_pin.py" "${SCRIPT_DIR}/CW_REF")"
 pinned_gizmo_ref="$(python3 "${SCRIPT_DIR}/ci/read_pin.py" "${SCRIPT_DIR}/GIZMOAPP_REF")"
+. "${SCRIPT_DIR}/RUNTIME_PINS.env"
 if [ "$cw_ref" != "$pinned_cw_ref" ]; then
   echo "CodingWorkspace HEAD ($cw_ref) does not match CW_REF ($pinned_cw_ref)." >&2
   echo "Use the pinned checkout, or deliberately update CW_REF before a test build." >&2
@@ -137,6 +138,7 @@ docker buildx build \
   --build-context "gizmosrc=${GIZMO_SRC}" \
   --build-arg "CW_REF=${cw_ref}" \
   --build-arg "GIZMOAPP_REF=${gizmo_ref}" \
+  --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
   -f "${SCRIPT_DIR}/Dockerfile" \
   -t "${IMAGE}" \
   --load \

@@ -224,6 +224,8 @@ jobs:
 
           printf 'CW_REF=%s\n' "$CW_REF" >> "$GITHUB_ENV"
           printf 'GIZMOAPP_REF=%s\n' "$GIZMOAPP_REF" >> "$GITHUB_ENV"
+          . codingworkspace-notebook/RUNTIME_PINS.env
+          printf 'OPENCODE_VERSION=%s\n' "$OPENCODE_VERSION" >> "$GITHUB_ENV"
           printf 'CW_CONTEXT=%s\n' "$cwsrc" >> "$GITHUB_ENV"
           printf 'GIZMO_CONTEXT=%s\n' "$gizmosrc" >> "$GITHUB_ENV"
 
@@ -269,6 +271,7 @@ jobs:
               --build-context "gizmosrc=$GIZMO_CONTEXT"
               --build-arg "CW_REF=$CW_REF"
               --build-arg "GIZMOAPP_REF=$GIZMOAPP_REF"
+              --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION"
             )
           fi
           docker buildx build "${build_args[@]}" .

@@ -1,0 +1,160 @@
+name: Propose soaked OpenCode updates
+
+on:
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: update-opencode-stable
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    if: github.repository == 'ubc/jupyter-images' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Checkout reviewed main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Read stable release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/repos/anomalyco/opencode/releases?per_page=100' \
+            --output "$RUNNER_TEMP/opencode-releases.json"
+
+      - name: Select the newest soaked release
+        id: release
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/opencode-release-output"
+          python3 codingworkspace-notebook/ci/update_opencode_release.py select \
+            "$RUNNER_TEMP/opencode-releases.json" \
+            codingworkspace-notebook/RUNTIME_PINS.env \
+            --minimum-age-hours 48 \
+            --github-output "$output"
+          cat "$output" >> "$GITHUB_OUTPUT"
+
+      - name: Download published architecture archives
+        if: steps.release.outputs.update == 'true'
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            '${{ steps.release.outputs.amd64_url }}' \
+            --output "$RUNNER_TEMP/opencode-amd64.tar.gz"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            '${{ steps.release.outputs.arm64_url }}' \
+            --output "$RUNNER_TEMP/opencode-arm64.tar.gz"
+
+      - name: Verify digests and CLI contracts, then update pins
+        if: steps.release.outputs.update == 'true'
+        run: |
+          set -euo pipefail
+          python3 codingworkspace-notebook/ci/update_opencode_release.py verify \
+            "$RUNNER_TEMP/opencode-releases.json" \
+            codingworkspace-notebook/RUNTIME_PINS.env \
+            --version '${{ steps.release.outputs.version }}' \
+            --amd64 "$RUNNER_TEMP/opencode-amd64.tar.gz" \
+            --arm64 "$RUNNER_TEMP/opencode-arm64.tar.gz"
+          codingworkspace-notebook/ci/validate-static.sh
+
+      - name: Open a guarded update pull request
+        if: steps.release.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+          PUBLISHED_AT: ${{ steps.release.outputs.published_at }}
+        run: |
+          set -euo pipefail
+          branch="automation/opencode-v${VERSION}"
+          pr_url=$(gh pr list --state open --head "$branch" --json url --jq '.[0].url // ""')
+          if [ -z "$pr_url" ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git switch --create "$branch"
+            git add codingworkspace-notebook/RUNTIME_PINS.env
+            git commit -m "auto: update OpenCode to ${VERSION}"
+            git push origin "HEAD:refs/heads/$branch"
+            pr_url=$(gh pr create \
+              --base main \
+              --head "$branch" \
+              --title "auto: update OpenCode to ${VERSION}" \
+              --body "Automated stable-release update. The release was published at ${PUBLISHED_AT}, passed the 48-hour soak, matched GitHub's published SHA-256 digests for amd64-baseline and arm64, and passed the image CLI contract checks. After protected validation and merge, a trusted main dispatch will rebuild, smoke-test, produce an SBOM, scan, and reject fixable critical vulnerabilities before moving preview.")
+          else
+            echo "Rechecking existing update PR: $pr_url"
+          fi
+          head_sha=$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)
+          gh workflow run build.yml --ref "$branch" \
+            -f publish=false \
+            -f scope=codingworkspace-notebook \
+            -f promote_codingworkspace=false
+          validation_run=""
+          for attempt in $(seq 1 30); do
+            validation_run=$(gh run list \
+              --workflow build.yml \
+              --branch "$branch" \
+              --event workflow_dispatch \
+              --limit 20 \
+              --json databaseId,headSha \
+              --jq ".[] | select(.headSha == \"$head_sha\") | .databaseId" \
+              | sed -n '1p')
+            [ -n "$validation_run" ] && break
+            sleep 2
+          done
+          if [ -z "$validation_run" ]; then
+            echo "The exact validation workflow run was not observed." >&2
+            exit 1
+          fi
+          gh run watch "$validation_run" --exit-status
+          gh pr merge "$pr_url" \
+            --squash \
+            --delete-branch \
+            --match-head-commit "$head_sha"
+          merge_sha=$(gh pr view "$pr_url" --json mergeCommit --jq .mergeCommit.oid)
+          if [ -z "$merge_sha" ]; then
+            echo "The merged main commit could not be resolved." >&2
+            exit 1
+          fi
+
+          # Merges performed with GITHUB_TOKEN do not recursively trigger a
+          # push workflow. Dispatch the protected main definition explicitly.
+          gh workflow run build.yml --ref main \
+            -f publish=true \
+            -f scope=codingworkspace-notebook \
+            -f promote_codingworkspace=true
+          publication_run=""
+          for attempt in $(seq 1 30); do
+            publication_run=$(gh run list \
+              --workflow build.yml \
+              --branch main \
+              --event workflow_dispatch \
+              --limit 20 \
+              --json databaseId,headSha \
+              --jq ".[] | select(.headSha == \"$merge_sha\") | .databaseId" \
+              | sed -n '1p')
+            [ -n "$publication_run" ] && break
+            sleep 2
+          done
+          if [ -z "$publication_run" ]; then
+            echo "The exact protected-main publication run was not observed." >&2
+            exit 1
+          fi
+          gh run watch "$publication_run" --exit-status

@@ -43,6 +43,9 @@ contract() {
       command -v bwrap >/dev/null
       command -v opencode >/dev/null
       command -v codingworkspace >/dev/null
+      pinned_opencode=$(sed -n 's/^OPENCODE_VERSION=//p' /etc/codingworkspace-runtime-pins.env)
+      test -n "$pinned_opencode"
+      test "$(opencode --version)" = "$pinned_opencode"
       python - <<"PY"
 import importlib.machinery
 import importlib.metadata as md
@@ -195,11 +198,14 @@ PY
       test "$(stat -c %a "$JUPYTER_RUNTIME_DIR")" = 700
     '
 
-  local label_cw label_gizmo
+  local label_cw label_gizmo label_opencode expected_opencode
   label_cw=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.source-revision" }}' "$IMAGE")
   label_gizmo=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.starter-revision" }}' "$IMAGE")
+  label_opencode=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.opencode-version" }}' "$IMAGE")
+  expected_opencode=$(sed -n 's/^OPENCODE_VERSION=//p' "$SCRIPT_DIR/../RUNTIME_PINS.env")
   test "$label_cw" = "$cw_ref"
   test "$label_gizmo" = "$gizmo_ref"
+  test "$label_opencode" = "$expected_opencode"
   echo "Image contract smoke passed: $IMAGE"
 }
 
