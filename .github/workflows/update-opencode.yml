@@ -85,10 +85,10 @@ jobs:
         run: |
           set -euo pipefail
           branch="automation/opencode-v${VERSION}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           pr_url=$(gh pr list --state open --head "$branch" --json url --jq '.[0].url // ""')
           if [ -z "$pr_url" ]; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git switch --create "$branch"
             git add codingworkspace-notebook/RUNTIME_PINS.env
             git commit -m "auto: update OpenCode to ${VERSION}"
@@ -157,4 +157,46 @@ jobs:
             echo "The exact protected-main publication run was not observed." >&2
             exit 1
           fi
-          gh run watch "$publication_run" --exit-status
+          if ! gh run watch "$publication_run" --exit-status; then
+            echo "Publication failed; reverting the exact rejected OpenCode pin." >&2
+            rollback_branch="automation/rollback-opencode-v${VERSION}-${merge_sha:0:7}"
+            git fetch origin main
+            git switch --detach origin/main
+            git switch --create "$rollback_branch"
+            git revert --no-edit "$merge_sha"
+            git push origin "HEAD:refs/heads/$rollback_branch"
+            rollback_pr=$(gh pr create \
+              --base main \
+              --head "$rollback_branch" \
+              --title "auto: roll back rejected OpenCode ${VERSION}" \
+              --body "The protected main image build for OpenCode ${VERSION} failed. This PR restores the previous reviewed runtime pins; the moving preview tag was retained or restored by the publication workflow.")
+            rollback_sha=$(gh pr view "$rollback_pr" --json headRefOid --jq .headRefOid)
+            gh workflow run build.yml --ref "$rollback_branch" \
+              -f publish=false \
+              -f scope=codingworkspace-notebook \
+              -f promote_codingworkspace=false
+            rollback_run=""
+            for attempt in $(seq 1 30); do
+              rollback_run=$(gh run list \
+                --workflow build.yml \
+                --branch "$rollback_branch" \
+                --event workflow_dispatch \
+                --limit 20 \
+                --json databaseId,headSha \
+                --jq ".[] | select(.headSha == \"$rollback_sha\") | .databaseId" \
+                | sed -n '1p')
+              [ -n "$rollback_run" ] && break
+              sleep 2
+            done
+            if [ -z "$rollback_run" ]; then
+              echo "The exact rollback validation run was not observed." >&2
+              exit 1
+            fi
+            gh run watch "$rollback_run" --exit-status
+            gh pr merge "$rollback_pr" \
+              --squash \
+              --delete-branch \
+              --match-head-commit "$rollback_sha"
+            echo "Rejected OpenCode ${VERSION} pins were rolled back." >&2
+            exit 1
+          fi

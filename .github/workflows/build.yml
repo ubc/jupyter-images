@@ -404,41 +404,58 @@ jobs:
           inputs.promote_codingworkspace == true
         run: |
           set -euo pipefail
-          docker buildx imagetools create --tag "$ECR_REPOSITORY:latest" "$ECR_REPOSITORY@$IMAGE_DIGEST"
-          observed=""
-          for attempt in $(seq 1 12); do
-            observed=$(aws ecr describe-images \
+          digest_for_tag() {
+            aws ecr describe-images \
               --repository-name "$IMAGE_NAME" \
-              --image-ids imageTag=latest \
+              --image-ids "imageTag=$1" \
               --query 'imageDetails[0].imageDigest' \
-              --output text 2>/dev/null || true)
-            [ "$observed" = "$IMAGE_DIGEST" ] && break
-            sleep 5
-          done
-          if [ "$observed" != "$IMAGE_DIGEST" ]; then
-            echo "latest resolved to $observed, expected $IMAGE_DIGEST" >&2
-            exit 1
-          fi
+              --output text 2>/dev/null || true
+          }
+          move_and_verify() {
+            local tag="$1"
+            local digest="$2"
+            local observed=""
+            docker buildx imagetools create --tag "$ECR_REPOSITORY:$tag" "$ECR_REPOSITORY@$digest"
+            for attempt in $(seq 1 12); do
+              observed=$(digest_for_tag "$tag")
+              [ "$observed" = "$digest" ] && return 0
+              sleep 5
+            done
+            echo "$tag resolved to $observed, expected $digest" >&2
+            return 1
+          }
+
+          previous_latest=$(digest_for_tag latest)
+          previous_preview=$(digest_for_tag preview)
+          case "$previous_latest" in
+            sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "latest has no rollback-safe immutable digest: $previous_latest" >&2; exit 1 ;;
+          esac
+          case "$previous_preview" in
+            sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "preview has no rollback-safe immutable digest: $previous_preview" >&2; exit 1 ;;
+          esac
+
+          restore_previous_tags() {
+            local status=$?
+            trap - EXIT
+            if [ "$status" -ne 0 ]; then
+              echo "Promotion failed; restoring previous moving-tag digests." >&2
+              move_and_verify latest "$previous_latest" || status=1
+              move_and_verify preview "$previous_preview" || status=1
+            fi
+            exit "$status"
+          }
+          trap restore_previous_tags EXIT
+
+          move_and_verify latest "$IMAGE_DIGEST"
           printf 'CODINGWORKSPACE_LATEST_MOVED=true\n' >> "$GITHUB_ENV"
 
           # Preview is the Hub-consumed moving tag, so update it last and only
           # after latest has been observed at the tested digest.
-          docker buildx imagetools create --tag "$ECR_REPOSITORY:preview" "$ECR_REPOSITORY@$IMAGE_DIGEST"
-          observed=""
-          for attempt in $(seq 1 12); do
-            observed=$(aws ecr describe-images \
-              --repository-name "$IMAGE_NAME" \
-              --image-ids imageTag=preview \
-              --query 'imageDetails[0].imageDigest' \
-              --output text 2>/dev/null || true)
-            [ "$observed" = "$IMAGE_DIGEST" ] && break
-            sleep 5
-          done
-          if [ "$observed" != "$IMAGE_DIGEST" ]; then
-            echo "preview resolved to $observed, expected $IMAGE_DIGEST" >&2
-            exit 1
-          fi
+          move_and_verify preview "$IMAGE_DIGEST"
           printf 'CODINGWORKSPACE_PREVIEW_MOVED=true\n' >> "$GITHUB_ENV"
+          trap - EXIT
 
       - name: Summarize verified moving tags
         if: always()

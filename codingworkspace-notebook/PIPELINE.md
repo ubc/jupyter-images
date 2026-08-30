@@ -51,6 +51,10 @@ After that automation PR reaches `main`, the hardened job still builds the
 exact image, runs the full image contract, produces an SBOM and all-severity
 vulnerability report, and enforces the fixable-CRITICAL gate. Only then may
 that narrowly identified automation commit move `latest` and `preview`.
+If the protected build fails after merge, the updater validates and merges an
+exact revert of that pin commit automatically. Promotion records both previous
+tag digests before mutation and restores them if either tag move or readback
+fails.
 Production remains an immutable digest in `jhub-config`; never point it at a
 moving tag.
 
@@ -365,7 +369,9 @@ Normally no operator action is required. The scheduled workflow opens the PR,
 waits for exact-head validation, merges through branch protection, then starts
 and waits for the hardened `main` build. A failed digest, archive, CLI, image
 contract, SBOM, or critical vulnerability gate leaves the old preview digest
-untouched. The previous immutable digest is never deleted by this workflow.
+untouched and automatically reverts the rejected pin on `main`. A partial tag
+promotion restores both prior tag digests. The previous immutable digest is
+never deleted by this workflow.
 
 Run discovery immediately:
 

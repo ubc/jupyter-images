@@ -140,8 +140,11 @@ for required in (
     "matrix.image == 'codingworkspace-notebook'",
     "github.event_name == 'workflow_dispatch'",
     "inputs.promote_codingworkspace == true",
-    "$ECR_REPOSITORY:latest",
-    "$ECR_REPOSITORY:preview",
+    "move_and_verify latest",
+    "move_and_verify preview",
+    "previous_latest",
+    "previous_preview",
+    "restore_previous_tags",
 ):
     if required not in promotion:
         raise SystemExit(f"CodingWorkspace promotion step is missing {required}")
@@ -195,6 +198,10 @@ for required in (
     "mergeCommit",
     "publication_run",
     "gh run watch \"$publication_run\" --exit-status",
+    "rollback_branch",
+    "git revert --no-edit \"$merge_sha\"",
+    "roll back rejected OpenCode",
+    "gh run watch \"$rollback_run\" --exit-status",
 ):
     if required not in update_job:
         raise SystemExit(f"OpenCode update automation is missing {required}")
@@ -228,9 +235,13 @@ for required in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "-gz${GIZMOAPP_REF:0:7}"
         raise SystemExit(f"candidate tags are not run-unique and source-identifying: {required}")
 
 for tag in ("latest", "preview"):
-    if f"--image-ids imageTag={tag}" not in promotion:
+    if f"previous_{tag}=$(digest_for_tag {tag})" not in promotion:
+        raise SystemExit(f"CodingWorkspace promotion does not retain the {tag} digest")
+    if f'move_and_verify {tag} "$IMAGE_DIGEST"' not in promotion:
         raise SystemExit(f"CodingWorkspace promotion does not verify the {tag} digest")
-if promotion.find("imageTag=latest") > promotion.find("$ECR_REPOSITORY:preview"):
+if promotion.find('move_and_verify latest "$IMAGE_DIGEST"') > promotion.find(
+    'move_and_verify preview "$IMAGE_DIGEST"'
+):
     raise SystemExit("CodingWorkspace preview can move before latest is verified")
 if "CODINGWORKSPACE_PREVIEW_MOVED=true" not in promotion:
     raise SystemExit("workflow cannot distinguish completed preview promotion")
