@@ -66,7 +66,9 @@ COPY --chown=${NB_UID}:${NB_GID} --chmod=0444 \
 USER ${NB_UID}
 RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
     set -eux; \
-    expected_ref="$(tr -d '[:space:]' < /tmp/CW_REF)"; \
+    expected_ref="$(sed -e 's/[[:space:]]//g' -e '/^$/d' -e '/^#/d' /tmp/CW_REF)"; \
+    test "${#expected_ref}" -eq 40; \
+    printf '%s' "${expected_ref}" | grep -Eq '^[0-9a-f]{40}$'; \
     test "${CW_REF}" = "${expected_ref}"; \
     test "$(git -c safe.directory=/cwsrc -C /cwsrc rev-parse HEAD)" = "${expected_ref}"; \
     mkdir -p /tmp/cwbuild; \
@@ -86,7 +88,9 @@ USER root
 COPY codingworkspace-notebook/GIZMOAPP_REF /tmp/GIZMOAPP_REF
 RUN --mount=type=bind,from=gizmosrc,target=/gizmosrc \
     set -eux; \
-    expected_ref="$(tr -d '[:space:]' < /tmp/GIZMOAPP_REF)"; \
+    expected_ref="$(sed -e 's/[[:space:]]//g' -e '/^$/d' -e '/^#/d' /tmp/GIZMOAPP_REF)"; \
+    test "${#expected_ref}" -eq 40; \
+    printf '%s' "${expected_ref}" | grep -Eq '^[0-9a-f]{40}$'; \
     test "${GIZMOAPP_REF}" = "${expected_ref}"; \
     test "$(git -c safe.directory=/gizmosrc -C /gizmosrc rev-parse HEAD)" = "${expected_ref}"; \
     test "$(git -c safe.directory=/gizmosrc -C /gizmosrc rev-parse --is-shallow-repository)" = "false"; \
