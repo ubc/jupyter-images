@@ -321,8 +321,10 @@ if not re.search(r"(?m)^permissions: \{\}\s*$", UPDATE_OPENCODE):
     raise SystemExit("OpenCode update workflow has broad top-level permissions")
 
 ordered_steps = (
+    "Build exact amd64 dependency layer metadata",
     "Build and publish immutable candidate with provenance and BuildKit SBOM",
     "Run CodingWorkspace image contract smoke",
+    "Extract exact-digest dependency evidence",
     "Generate SPDX SBOM",
     "Generate vulnerability report",
     "Enforce fixable CRITICAL vulnerability policy",
@@ -335,8 +337,25 @@ ordered_steps = (
 positions = [BUILD.find(f"      - name: {name}") for name in ordered_steps]
 if any(position < 0 for position in positions) or positions != sorted(positions):
     raise SystemExit("published-digest smoke/scan/promotion steps are missing or out of order")
-if publish_job_text.count("docker buildx build") != 1:
-    raise SystemExit("the trusted job must build/push exactly once so scans match publication")
+if publish_job_text.count("docker buildx build") != 2:
+    raise SystemExit("the trusted job must export dependency metadata then build the final image")
+dependency_build = step(BUILD, "Build exact amd64 dependency layer metadata")
+for required in (
+    "--platform linux/amd64",
+    "--target dependency-wheelhouse-evidence",
+    "--build-context \"cwbuildersrc=$CW_BUILDER_CONTEXT\"",
+    "dependency_manifest_evidence.py",
+    "DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256",
+):
+    if required not in dependency_build:
+        raise SystemExit(f"dependency metadata build is missing {required}")
+if "--push" in dependency_build:
+    raise SystemExit("the dependency metadata export must not publish an image")
+publish_candidate = step(
+    BUILD, "Build and publish immutable candidate with provenance and BuildKit SBOM"
+)
+if publish_candidate.count("--push") != 1 or "--platform linux/amd64" not in publish_candidate:
+    raise SystemExit("the final candidate must be published exactly once for linux/amd64")
 for required in (
     'docker pull "$ECR_REPOSITORY@$digest"',
     'docker tag "$ECR_REPOSITORY@$digest" "$LOCAL_IMAGE"',
@@ -364,6 +383,8 @@ evidence = step(BUILD, "Record release evidence")
 for required in (
     "immutable_publish_result",
     "contract_smoke_result",
+    "dependency_layer_result",
+    "dependency_exact_evidence_result",
     "sbom_result",
     "vulnerability_scan_result",
     "vulnerability_gate_result",
@@ -374,6 +395,12 @@ for required in (
     "published-image.txt",
     "SHA256SUMS",
     "independent_release_record_required_before_production=true",
+    "image_platform",
+    "dependency_builder_commit",
+    "dependency_builder_blob",
+    "dependency_wheel_index_url",
+    "dependency_runtime_id",
+    "dependency_manifest_sha256",
 ):
     if required not in evidence:
         raise SystemExit(f"release evidence is missing {required}")
@@ -381,7 +408,6 @@ upload = step(BUILD, "Upload build, SBOM, and vulnerability evidence")
 for required in ("github.run_id", "github.run_attempt", "if: always()"):
     if required not in upload:
         raise SystemExit(f"failure/rerun evidence handling is missing {required}")
-
 promotion_receipt = step(BUILD, "Record CodingWorkspace promotion receipt")
 promotion_receipt_upload = step(BUILD, "Upload CodingWorkspace promotion receipt")
 for receipt_step, description in (
@@ -433,6 +459,16 @@ for required in (
 ):
     if required not in promotion_receipt_upload:
         raise SystemExit(f"post-promotion receipt upload is missing {required}")
+exact_dependency_evidence = step(BUILD, "Extract exact-digest dependency evidence")
+for required in (
+    "codingworkspace-dependency-wheelhouse-manifest.json",
+    "codingworkspace-dependency-wheelhouse-identity.env",
+    'cmp "$DEPENDENCY_MANIFEST_EXPORT"',
+    "docker image inspect",
+    "linux/amd64",
+):
+    if required not in exact_dependency_evidence:
+        raise SystemExit(f"exact-digest dependency evidence is missing {required}")
 vulnerability_report = step(BUILD, "Generate vulnerability report")
 for required in (
     "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
@@ -473,6 +509,17 @@ if any(position < 0 for position in local_positions) or local_positions != sorte
     raise SystemExit("local publisher does not build/load/smoke/scan/push/record in order")
 if "--load" not in LOCAL_PUBLISH or "--push" in LOCAL_PUBLISH:
     raise SystemExit("local publisher must load and gate the image before an explicit push")
+for required in (
+    "--platform linux/amd64",
+    "--target dependency-wheelhouse-evidence",
+    "CW_BUILDER_CONTEXT",
+    "DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256",
+    "DEPENDENCY_WHEEL_INDEX_URL",
+    "codingworkspace-dependency-wheelhouse-manifest.json",
+    "codingworkspace-dependency-wheelhouse-identity.env",
+):
+    if required not in LOCAL_PUBLISH:
+        raise SystemExit(f"local dependency build/evidence is missing {required}")
 for required in (
     "trivy_version=0.74.0",
     "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",

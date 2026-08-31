@@ -5,6 +5,11 @@ runbook describes the trust boundary, source pins, artifacts, promotion, and
 rollback. The CodingWorkspace repository's `RELEASING.md` remains the
 developer-facing release guide.
 
+This runbook treats the Buildx bundle-context repair and the dependency
+wheelhouse as one consolidated PR14 review/deployment unit. LTIC should review,
+merge, build, and record the complete contract below together; there is no
+intermediate bundle-only image to deploy and no second wheelhouse PR to wait for.
+
 ## Trust-separated flow
 
 ```text
@@ -13,7 +18,8 @@ fork or same-repo PR
        └─ CodingWorkspace/workflow paths only: run CW static validation
 
 reviewed jupyter-images main push touching CodingWorkspace
-  └─ validate → build/push immutable candidate → pull exact digest
+  └─ validate → export exact amd64 dependency identity
+              → build/push immutable candidate → pull exact digest
                                                   └─ image smoke + SBOM/vulnerability scan
                                                      (CodingWorkspace preview/latest stay put)
 
@@ -105,8 +111,9 @@ changing `CW_REF`, and it has no authority to move `preview` or `latest`.
    publication still requires `publish=true`.
 4. **Hardened CodingWorkspace build/publish/scan/promote.** Runs only for a
    CodingWorkspace selection on a push to `main`, or a `workflow_dispatch` of
-   `main` with `publish=true`. It resolves exact sources, publishes one
-   immutable ECR image with BuildKit provenance/SBOM attestations, resolves and
+   `main` with `publish=true`. It resolves exact sources, exports the cached
+   amd64 dependency manifest, and publishes one immutable ECR image with
+   BuildKit provenance/SBOM attestations. It resolves and
    pulls that exact ECR digest, and runs the CodingWorkspace smoke, Syft, a
    complete Trivy report, and the automatic fixable-CRITICAL Trivy gate against
    the pulled digest. A rejected immutable candidate may remain in ECR for
@@ -152,8 +159,35 @@ condition in branch YAML.
 | jupyter-images | The checked-out full `GITHUB_SHA` on reviewed `main` |
 | CodingWorkspace | Normally the tracker-owned lowercase 40-character SHA in `CW_REF`, which on `jupyter-images` main equals the CodingWorkspace `release` head. An explicit main-only manual candidate may instead select a different full lowercase SHA without editing `CW_REF`; it is non-promoting and must be reachable from the fresh private clone's `origin/main`. In both cases the private clone uses `CW_DEPLOY_KEY`, the selected object must be that exact SHA-1 commit, and detached checkout must equal it. |
 | GizmoApp | Exactly one lowercase 40-character SHA in `GIZMOAPP_REF`; credential-free public clone; detached checkout must equal that SHA and use SHA-1 object format |
+| Dependency builder | `DEPENDENCY_LAYER.env` pins private CodingWorkspace commit `83d4956dc2d091309daaf7be32c350c96d8b2aa2` and builder blob `7a30db859d3451293f9193b75175801b7ed49ec5`; the workflow extracts only that blob from the already authenticated full clone and re-hashes it inside BuildKit |
 | Base image | Version tag plus `sha256` digest in `Dockerfile` |
 | OpenCode and other runtime tools | Fixed versions/checksums in reviewed image pin files |
+
+Both Git bundles and the builder-file context are BuildKit `RUN` bind mounts;
+they add zero bytes to the final image by themselves and never carry checkout
+configuration or credentials. For this reviewed input set, the Gizmo bundle is
+approximately 0.41 MB, the intentional final starter `.git` is approximately
+0.48 MB, and the sealed wheelhouse is approximately 6.2 MB. The Dockerfile
+places the stable Gizmo/wheelhouse work ahead of the frequently changing
+CodingWorkspace source layer so ordinary application releases can reuse it.
+
+The image runs the reviewed builder once as root, after exact Gizmo
+reconstruction, with the final `/opt/conda/bin/python`. It fixes the source to
+`https://pypi.org/simple`, sets `PIP_CONFIG_FILE=/dev/null`, and removes any
+inherited extra index. Direct requirements are reviewed inputs; transitive
+versions are identity-bound by the resolved artifact rather than fully
+lock-file reproducible before the build. Exact wheel records and a canonical
+full `wheelSetSha256` prevent a changed resolution from silently reusing an
+accepted identity. A root-only atomic finalizer changes only the builder's probe
+`runtimeId`, adds that wheel-set hash, proves every other existing manifest
+field unchanged, fsyncs, and reseals the root-owned tree. The final ID is
+`cw-wh-v1:<abi>:<platform>:<machine>:<wheel-set-sha256>`.
+
+The trusted build is explicitly `linux/amd64`. Both the metadata export and
+published build pass `--platform linux/amd64`, the Dockerfile rejects any other
+`TARGETARCH`, and contract/evidence checks record the platform. The Hub profile
+must preserve existing selectors while adding `kubernetes.io/arch: amd64`, or
+LTIC must attest that every eligible node for this profile is amd64.
 
 The private clone uses the checked-in GitHub Ed25519 host key at
 `ci/github_known_hosts` with strict host checking. Static validation compares
@@ -209,8 +243,10 @@ or automated pin update is a proposed change, not authority to publish.
 
 ## SBOM, vulnerability, and release evidence
 
-The trusted job publishes the immutable candidate once, resolves its registry
-digest, pulls that exact digest, and then scans it:
+The trusted job first exports the architecture-qualified wheelhouse manifest,
+then supplies its exact runtime ID and raw SHA-256 to the cached final build as
+verified OCI labels. It publishes the immutable candidate once, resolves its
+registry digest, pulls that exact digest, and then scans it:
 
 - Syft `v1.51.1` writes SPDX JSON;
 - Trivy `v0.74.0` writes a JSON report containing all severities, fixed and
@@ -220,8 +256,12 @@ digest, pulls that exact digest, and then scans it:
 - the pushed BuildKit result includes maximum provenance plus an SBOM
   attestation.
 
-The workflow artifact also records the exact source revisions, tested ECR
-tag/digest, workflow run, whether CodingWorkspace promotion was requested,
+Before scanning, the job extracts the manifest and root-owned identity file
+from the exact pulled digest, compares the manifest byte-for-byte with the
+cached export, and verifies the image reports `linux/amd64`. The workflow
+artifact also records the exact source revisions, tested ECR tag/digest,
+workflow run, whether CodingWorkspace promotion was requested, builder
+commit/blob, layer version, runtime ID, raw manifest hash,
 `published-image.txt`, and checksums for every evidence file. Scanner-generation,
 smoke, or fixable-CRITICAL failure blocks moving-tag promotion, though the
 immutable candidate already pushed may remain for diagnosis. A release reviewer
@@ -254,9 +294,14 @@ The trusted job runs:
 codingworkspace-notebook/ci/smoke-image.sh contract IMAGE CW_FULL_SHA GIZMO_FULL_SHA
 ```
 
-It verifies the non-root runtime user, pinned Jupyter components, Bubblewrap and
-OpenCode executables, exact immutable starter checkout, source labels, and
-absence of the global direct-OpenCode credential path.
+It runs the contract container with Docker networking disabled and verifies the
+non-root runtime user, pinned Jupyter components, Bubblewrap and OpenCode
+executables, exact immutable starter checkout, source/dependency labels, every
+wheel through `sha256sum -c`, and absence of the global direct-OpenCode
+credential path. It also clones the baked starter into a disposable checkout,
+runs its real installer with `PIP_NO_INDEX=1`, initializes the database, runs
+`pip check` and imports, starts Gunicorn on loopback, and requires successful
+health and root HTTP requests before clean shutdown.
 
 Before moving `release`, run on a compatible Docker/cluster host:
 
@@ -303,6 +348,9 @@ singleuser:
         # Preserve every other existing environment value.
         environment:
           CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS: "120"
+        # Preserve existing selectors; this reviewed digest is amd64-only.
+        node_selector:
+          kubernetes.io/arch: amd64
         # Add preStop alongside the profile's existing postStart entry.
         lifecycle_hooks:
           preStop:
@@ -325,6 +373,18 @@ pod grace period to the child process; the environment value is therefore the
 runtime's trusted mirror for deriving its bounded hook budget. Hub-config CI
 must compare both configured values, and preview-Hub acceptance must verify the
 rendered pod field and container environment agree before release.
+
+The image-owned proxy also fixes
+`CODINGWORKSPACE_PREVIEW_IDLE_TIMEOUT_SECONDS=600` and validates the sealed
+wheelhouse before launching CodingWorkspace. It sets the fixed `/opt` path,
+mode `prefer`, and the exact manifest runtime ID; any raw manifest hash,
+wheel-set hash, Python implementation/version/ABI/cache-tag/platform/machine, or
+runtime-ID mismatch aborts startup.
+
+Pin the profile image to the exact accepted ECR digest, not a moving tag. Keep
+the existing Zero-to-JupyterHub hook and continuous prePuller enabled for
+profile images. During preview acceptance, record both cold spawn time (digest
+not present on the selected node) and warm spawn time (digest already pulled).
 
 Do not replace it with a drain-only signal or a SIGTERM sent only to Jupyter.
 Simpervisor forwards parent SIGTERM to the child and then immediately exits
@@ -353,21 +413,25 @@ bound age. Restarting Jupyter does not reset the claimed credential age.
 
 1. Land the CodingWorkspace changes on `main`; keep its `release` branch at the
    current accepted revision. Do not change `CW_REF` in the image PR.
-2. Merge the image PR. Confirm non-secret validation and any trusted immutable
-   candidate build pass. That candidate uses the current `release` pin; confirm
+2. Merge the consolidated PR14 image change. Confirm non-secret validation and
+   any trusted immutable candidate build pass. That candidate uses the current
+   `release` pin; confirm
    `preview` and CodingWorkspace `latest` did not move.
 3. Advance CodingWorkspace `release` to the approved source commit. Within 15
    minutes `track-cw.yml` updates `CW_REF` and dispatches the one promotion
    build. A manual tracker run avoids the wait.
-4. Confirm the tracker and dispatched build are green, and verify the separate
-   promotion receipt checksum and `promoted` outcome. Run the namespace and
-   lifecycle tests against the resulting exact digest. The automated gate must
+4. Confirm the tracker and dispatched `linux/amd64` build are green, and verify
+   the separate promotion receipt checksum and `promoted` outcome. Run the
+   namespace and lifecycle tests against the resulting exact digest. The
+   automated gate must
    show no fixable CRITICAL finding; resolve other findings or record a
    reviewed, expiring exception.
 5. Compare the release artifact's exact full refs and digest to the intended
    commits.
-6. Stop/start a preview test server and complete the actual-Hub acceptance
-   gates. Running pods are never hot-swapped.
+6. Pin the preview profile to the exact digest, preserve hook/continuous
+   prePuller coverage, enforce amd64 scheduling, then Stop/Start test servers.
+   Complete the actual-Hub gates and record cold/warm spawn timing. Running pods
+   are never hot-swapped.
 7. Verify `SHA256SUMS` and copy the exact evidence bundle into the independent,
    indefinite course release record. Record its location in the change.
 8. Promote to production only by a reviewed `jhub-config` change pinning the
@@ -450,7 +514,9 @@ Expected promotion evidence:
 - the dispatched workflow says promotion was explicitly enabled;
 - contract/SBOM/Trivy steps passed;
 - `SHA256SUMS` validates the all-severity report, gate report, SBOM, release
-  metadata, and `published-image.txt`;
+  metadata, exact-digest dependency manifest/identity, and `published-image.txt`;
+- evidence reports `linux/amd64`, the exact builder commit/blob, runtime ID,
+  wheel-set identity, and raw manifest hash;
 - the separate promotion receipt's `SHA256SUMS` validates, its outcome is
   `promoted`, and its prior/attempted/read-back/final tag digests are coherent;
 - `preview` and the immutable tag resolve to the recorded digest; and
@@ -478,6 +544,9 @@ runbook.
 | Static validation rejects an Action | Resolve the desired upstream release and review/pin its full commit; do not switch to a floating tag |
 | Tracker cannot clone CodingWorkspace | Check the read-only deploy key, the pinned GitHub host key, and repository access; never weaken strict host checking |
 | Exact-SHA candidate is rejected before build | Supply one lowercase 40-character commit reachable from the freshly cloned private `origin/main`, dispatch reviewed `main`, and keep `promote_codingworkspace=false`; never change `CW_REF` merely to test it |
+| Dependency builder commit/blob check fails | The already authenticated full private clone does not contain the reviewed input; do not fetch a mutable script or pass checkout metadata into BuildKit |
+| Dependency manifest export and final build differ | Resolution or cache input changed between the two phases; publication stops. Re-run from reviewed inputs and investigate the exact manifests; never relabel a different artifact |
+| Pod is scheduled on a non-amd64 node | Profile regression: preserve existing selectors and add `kubernetes.io/arch: amd64`, or constrain the eligible node pool and record LTIC's attestation |
 | Tracker push loses a race | No force/rebase is used; the next scheduled run retries from fresh `main` |
 | OpenCode update PR is not merged | Inspect its dispatched validation and branch-protection requirements; the next schedule revalidates and retries the exact open PR head |
 | No eligible OpenCode update is proposed | Expected while newer stable releases are inside the 48-hour soak, lack both required published digests/assets, or are not newer than the pin |

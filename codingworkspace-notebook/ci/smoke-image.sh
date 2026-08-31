@@ -38,7 +38,7 @@ contract() {
   require_ref "$cw_ref"
   require_ref "$gizmo_ref"
   docker image inspect "$IMAGE" >/dev/null
-  docker run --rm \
+  docker run --rm --network none \
     -e "EXPECTED_CW_REF=$cw_ref" \
     -e "EXPECTED_GIZMOAPP_REF=$gizmo_ref" \
     --entrypoint /bin/bash "$IMAGE" -lc '
@@ -71,6 +71,11 @@ from codingworkspace_jupyter_runtime import (
     derive_codingworkspace_shutdown_seconds,
     parse_termination_grace_seconds,
 )
+from codingworkspace_dependency_contract import image_dependency_environment
+dependency_environment = image_dependency_environment()
+assert dependency_environment["CODINGWORKSPACE_DEPENDENCY_WHEELHOUSE"] == "/opt/codingworkspace-dependency-wheelhouse"
+assert dependency_environment["CODINGWORKSPACE_DEPENDENCY_WHEELHOUSE_MODE"] == "prefer"
+assert dependency_environment["CODINGWORKSPACE_DEPENDENCY_RUNTIME_ID"].startswith("cw-wh-v1:")
 assert parse_termination_grace_seconds("120") == 120
 assert derive_codingworkspace_shutdown_seconds(120) == 90
 assert derive_codingworkspace_shutdown_seconds(100) == 73
@@ -190,6 +195,59 @@ PY
       test ! -w "$starter"
       test "$(git -c safe.directory="$starter" -C "$starter" rev-parse HEAD)" = "$EXPECTED_GIZMOAPP_REF"
       test "$(git -c safe.directory="$starter" -C "$starter" rev-parse --show-object-format)" = sha1
+      wheelhouse=/opt/codingworkspace-dependency-wheelhouse
+      test "$(stat -c %u:%g:%a "$wheelhouse")" = 0:0:555
+      (cd "$wheelhouse" && sha256sum --check --strict SHA256SUMS)
+      offline_env=$(mktemp -d /tmp/codingworkspace-wheelhouse-smoke.XXXXXX)
+      git clone --quiet --no-local --no-hardlinks "$starter" "$offline_env/GizmoApp"
+      (
+        cd "$offline_env/GizmoApp"
+        env -u PIP_EXTRA_INDEX_URL \
+          ALLOW_NETWORK_INSTALL=1 \
+          PIP_CONFIG_FILE=/dev/null \
+          PIP_FIND_LINKS="file://$wheelhouse" \
+          PIP_NO_INDEX=1 \
+          ./scripts/install_checkout.sh
+        .venv/bin/python -m pip check
+        .venv/bin/python -c "import flask, gunicorn, openai"
+        gizmo_pid=""
+        stop_gizmo() {
+          if [ -n "$gizmo_pid" ] && kill -0 "$gizmo_pid" 2>/dev/null; then
+            kill -TERM "$gizmo_pid"
+            wait "$gizmo_pid"
+          fi
+        }
+        trap stop_gizmo EXIT
+        GIZMOAPP_ENV=development \
+          GIZMOAPP_PORT=18001 \
+          GIZMOAPP_URL_PREFIX= \
+          .venv/bin/gunicorn --workers 1 --bind 127.0.0.1:18001 \
+          server.wsgi:app > "$offline_env/gunicorn.log" 2>&1 &
+        gizmo_pid=$!
+        ready=0
+        for attempt in $(seq 1 60); do
+          if curl --fail --silent --show-error \
+            http://127.0.0.1:18001/healthz >/dev/null; then
+            ready=1
+            break
+          fi
+          if ! kill -0 "$gizmo_pid" 2>/dev/null; then
+            cat "$offline_env/gunicorn.log" >&2
+            exit 1
+          fi
+          sleep 0.25
+        done
+        if [ "$ready" != 1 ]; then
+          cat "$offline_env/gunicorn.log" >&2
+          exit 1
+        fi
+        curl --fail --silent --show-error http://127.0.0.1:18001/ >/dev/null
+        kill -0 "$gizmo_pid"
+        stop_gizmo
+        gizmo_pid=""
+        trap - EXIT
+      )
+      rm -rf -- "$offline_env"
       test ! -e /etc/opencode/opencode.json
       test -z "${OPENCODE_CONFIG:-}"
       test "${JUPYTERHUB_SINGLEUSER_APP:-}" = "jupyter_server.serverapp.ServerApp"
@@ -203,13 +261,34 @@ PY
     '
 
   local label_cw label_gizmo label_opencode expected_opencode
+  local label_builder_ref label_builder_blob label_index label_layer label_runtime label_manifest
+  local artifact_runtime artifact_manifest image_platform
   label_cw=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.source-revision" }}' "$IMAGE")
   label_gizmo=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.starter-revision" }}' "$IMAGE")
   label_opencode=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.opencode-version" }}' "$IMAGE")
   expected_opencode=$(sed -n 's/^OPENCODE_VERSION=//p' "$SCRIPT_DIR/../RUNTIME_PINS.env")
+  label_builder_ref=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.dependency-wheelhouse.builder-revision" }}' "$IMAGE")
+  label_builder_blob=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.dependency-wheelhouse.builder-blob" }}' "$IMAGE")
+  label_index=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.dependency-wheelhouse.index-url" }}' "$IMAGE")
+  label_layer=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.dependency-wheelhouse.layer-version" }}' "$IMAGE")
+  label_runtime=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.dependency-wheelhouse.runtime-id" }}' "$IMAGE")
+  label_manifest=$(docker image inspect --format '{{ index .Config.Labels "org.codingworkspace.dependency-wheelhouse.manifest-sha256" }}' "$IMAGE")
+  artifact_runtime=$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
+    "sed -n 's/^DEPENDENCY_RUNTIME_ID=//p' /etc/codingworkspace-dependency-wheelhouse.env")
+  artifact_manifest=$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
+    "sed -n 's/^DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256=//p' /etc/codingworkspace-dependency-wheelhouse.env")
+  image_platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")
+  . "$SCRIPT_DIR/../DEPENDENCY_LAYER.env"
   test "$label_cw" = "$cw_ref"
   test "$label_gizmo" = "$gizmo_ref"
   test "$label_opencode" = "$expected_opencode"
+  test "$label_builder_ref" = "$DEPENDENCY_BUILDER_REF"
+  test "$label_builder_blob" = "$DEPENDENCY_BUILDER_BLOB"
+  test "$label_index" = "$DEPENDENCY_WHEEL_INDEX_URL"
+  test "$label_layer" = "$DEPENDENCY_WHEELHOUSE_LAYER_VERSION"
+  test "$label_runtime" = "$artifact_runtime"
+  test "$label_manifest" = "$artifact_manifest"
+  test "$image_platform" = linux/amd64
   echo "Image contract smoke passed: $IMAGE"
 }
 

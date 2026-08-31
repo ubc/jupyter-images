@@ -30,6 +30,10 @@ set -euo pipefail
 PLATFORM="${PLATFORM:-linux/amd64}"
 AWS_PROFILE="${AWS_PROFILE:-shared}"
 IMAGE_NAME="codingworkspace-notebook"
+if [ "$PLATFORM" != "linux/amd64" ]; then
+  echo "This reviewed CodingWorkspace image release is pinned to linux/amd64." >&2
+  exit 1
+fi
 
 # Build context is the jupyter-images repo root (parent of this script's dir).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,6 +100,7 @@ fi
 pinned_cw_ref="$(python3 "${SCRIPT_DIR}/ci/read_pin.py" "${SCRIPT_DIR}/CW_REF")"
 pinned_gizmo_ref="$(python3 "${SCRIPT_DIR}/ci/read_pin.py" "${SCRIPT_DIR}/GIZMOAPP_REF")"
 . "${SCRIPT_DIR}/RUNTIME_PINS.env"
+. "${SCRIPT_DIR}/DEPENDENCY_LAYER.env"
 if [ "$cw_ref" != "$pinned_cw_ref" ]; then
   echo "CodingWorkspace HEAD ($cw_ref) does not match CW_REF ($pinned_cw_ref)." >&2
   echo "Use the pinned checkout, or deliberately update CW_REF before a test build." >&2
@@ -127,8 +132,36 @@ cleanup_source_contexts() {
 trap cleanup_source_contexts EXIT
 CW_CONTEXT="${SOURCE_CONTEXT_ROOT}/cw"
 GIZMO_CONTEXT="${SOURCE_CONTEXT_ROOT}/gizmo"
+CW_BUILDER_CONTEXT="${SOURCE_CONTEXT_ROOT}/dependency-builder"
 python3 "${SCRIPT_DIR}/ci/prepare_git_context.py" "$CW_SRC" "$cw_ref" "$CW_CONTEXT"
 python3 "${SCRIPT_DIR}/ci/prepare_git_context.py" "$GIZMO_SRC" "$gizmo_ref" "$GIZMO_CONTEXT"
+python3 "${SCRIPT_DIR}/ci/prepare_git_blob_context.py" \
+  "$CW_SRC" "$DEPENDENCY_BUILDER_REF" scripts/build_dependency_wheelhouse.py \
+  "$DEPENDENCY_BUILDER_BLOB" "$CW_BUILDER_CONTEXT"
+
+DEPENDENCY_EXPORT="${SOURCE_CONTEXT_ROOT}/dependency-export"
+DEPENDENCY_METADATA="${SOURCE_CONTEXT_ROOT}/dependency-metadata.env"
+echo ">> Build exact linux/amd64 dependency metadata"
+docker buildx build \
+  --platform linux/amd64 \
+  --target dependency-wheelhouse-evidence \
+  --build-context "cwsrc=${CW_CONTEXT}" \
+  --build-context "gizmosrc=${GIZMO_CONTEXT}" \
+  --build-context "cwbuildersrc=${CW_BUILDER_CONTEXT}" \
+  --build-arg "CW_REF=${cw_ref}" \
+  --build-arg "GIZMOAPP_REF=${gizmo_ref}" \
+  --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
+  --build-arg "DEPENDENCY_WHEELHOUSE_LAYER_VERSION=${DEPENDENCY_WHEELHOUSE_LAYER_VERSION}" \
+  --build-arg "DEPENDENCY_BUILDER_REF=${DEPENDENCY_BUILDER_REF}" \
+  --build-arg "DEPENDENCY_BUILDER_BLOB=${DEPENDENCY_BUILDER_BLOB}" \
+  --build-arg "DEPENDENCY_WHEEL_INDEX_URL=${DEPENDENCY_WHEEL_INDEX_URL}" \
+  --output "type=local,dest=${DEPENDENCY_EXPORT}" \
+  -f "${SCRIPT_DIR}/Dockerfile" \
+  "${ROOT_DIR}"
+python3 "${SCRIPT_DIR}/ci/dependency_manifest_evidence.py" \
+  "${DEPENDENCY_EXPORT}/manifest.json" "$DEPENDENCY_WHEELHOUSE_LAYER_VERSION" \
+  --format github-env > "$DEPENDENCY_METADATA"
+. "$DEPENDENCY_METADATA"
 
 # Image tag: default to <jupyter-images sha>-cw<cw sha>-gz<gizmo sha>.
 if [ -z "${IMAGE_TAG:-}" ]; then
@@ -149,9 +182,16 @@ docker buildx build \
   --platform "${PLATFORM}" \
   --build-context "cwsrc=${CW_CONTEXT}" \
   --build-context "gizmosrc=${GIZMO_CONTEXT}" \
+  --build-context "cwbuildersrc=${CW_BUILDER_CONTEXT}" \
   --build-arg "CW_REF=${cw_ref}" \
   --build-arg "GIZMOAPP_REF=${gizmo_ref}" \
   --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
+  --build-arg "DEPENDENCY_WHEELHOUSE_LAYER_VERSION=${DEPENDENCY_WHEELHOUSE_LAYER_VERSION}" \
+  --build-arg "DEPENDENCY_BUILDER_REF=${DEPENDENCY_BUILDER_REF}" \
+  --build-arg "DEPENDENCY_BUILDER_BLOB=${DEPENDENCY_BUILDER_BLOB}" \
+  --build-arg "DEPENDENCY_WHEEL_INDEX_URL=${DEPENDENCY_WHEEL_INDEX_URL}" \
+  --build-arg "DEPENDENCY_RUNTIME_ID=${DEPENDENCY_RUNTIME_ID}" \
+  --build-arg "DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256=${DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256}" \
   -f "${SCRIPT_DIR}/Dockerfile" \
   -t "${IMAGE}" \
   --load \
@@ -167,6 +207,40 @@ env \
   -u AWS_SESSION_TOKEN \
   -u AWS_SECURITY_TOKEN \
   "${SCRIPT_DIR}/ci/scan-local-image.sh" "$IMAGE" "$SECURITY_REPORT_DIR"
+
+echo ">> Extract exact loaded-image dependency evidence"
+dependency_container=$(docker create "$IMAGE")
+cleanup_dependency_container() {
+  docker rm -f "$dependency_container" >/dev/null 2>&1 || true
+}
+trap 'cleanup_dependency_container; cleanup_source_contexts' EXIT
+docker cp \
+  "$dependency_container:/opt/codingworkspace-dependency-wheelhouse/manifest.json" \
+  "$SECURITY_REPORT_DIR/codingworkspace-dependency-wheelhouse-manifest.json"
+docker cp \
+  "$dependency_container:/etc/codingworkspace-dependency-wheelhouse.env" \
+  "$SECURITY_REPORT_DIR/codingworkspace-dependency-wheelhouse-identity.env"
+cleanup_dependency_container
+trap cleanup_source_contexts EXIT
+cmp "${DEPENDENCY_EXPORT}/manifest.json" \
+  "$SECURITY_REPORT_DIR/codingworkspace-dependency-wheelhouse-manifest.json"
+test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = linux/amd64
+{
+  printf 'image_platform=linux/amd64\n'
+  printf 'dependency_builder_commit=%s\n' "$DEPENDENCY_BUILDER_REF"
+  printf 'dependency_builder_blob=%s\n' "$DEPENDENCY_BUILDER_BLOB"
+  printf 'dependency_wheel_index_url=%s\n' "$DEPENDENCY_WHEEL_INDEX_URL"
+  printf 'dependency_layer_version=%s\n' "$DEPENDENCY_WHEELHOUSE_LAYER_VERSION"
+  printf 'dependency_runtime_id=%s\n' "$DEPENDENCY_RUNTIME_ID"
+  printf 'dependency_manifest_sha256=%s\n' "$DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256"
+} > "$SECURITY_REPORT_DIR/codingworkspace-dependency-wheelhouse-release.txt"
+(
+  cd "$SECURITY_REPORT_DIR"
+  sha256sum \
+    codingworkspace-dependency-wheelhouse-manifest.json \
+    codingworkspace-dependency-wheelhouse-identity.env \
+    codingworkspace-dependency-wheelhouse-release.txt >> SHA256SUMS
+)
 
 echo ">> ECR login: ${REGISTRY}"
 aws ecr get-login-password --region "${AWS_REGION}" --profile "${AWS_PROFILE}" \
