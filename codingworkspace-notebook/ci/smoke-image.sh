@@ -3,6 +3,10 @@
 # Docker host. The actual JupyterHub/kernel/PVC acceptance run remains required.
 set -euo pipefail
 
+# Referenced when asserting the image OpenCode label against
+# RUNTIME_PINS.env. Same derivation as ci/validate-static.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 usage() {
   cat >&2 <<'EOF'
 usage:
