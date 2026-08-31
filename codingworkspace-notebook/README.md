@@ -125,7 +125,7 @@ The trusted build resolves three reviewed inputs:
 | Input | Pin / source |
 | --- | --- |
 | Notebook base | Digest-pinned `quay.io/jupyter/base-notebook:hub-5.5.0` in `Dockerfile` |
-| CodingWorkspace | Normally the tracker-owned full SHA in `CW_REF`, equal to the CodingWorkspace `release` head on `jupyter-images` main. A reviewed-main manual dispatch may provide a separate exact full-SHA candidate without editing `CW_REF`, but that override can never promote. Private source is cloned with the read-only deploy key and converted to a bundle-only `cwsrc` build context. |
+| CodingWorkspace | Normally the tracker-owned full SHA in `CW_REF`, equal to the CodingWorkspace `release` head on `jupyter-images` main. A reviewed-main manual dispatch may provide a separate exact full-SHA candidate that is reachable from the freshly cloned private `origin/main`, without editing `CW_REF`; that override can never promote. Private source is cloned with the read-only deploy key and converted to a bundle-only `cwsrc` build context. |
 | GizmoApp starter | Full SHA in `GIZMOAPP_REF`; public source is cloned and converted to a bundle-only `gizmosrc` build context |
 
 The GizmoApp checkout is baked at
@@ -157,9 +157,10 @@ requirements and both architecture checks together.
   **does not** move `preview` or `latest`.
 - A trusted manual dispatch of reviewed `main` may supply an exact lowercase
   40-character `codingworkspace_candidate_sha`. The workflow verifies that the
-  private clone contains that exact commit, records it in the immutable tag and
-  evidence, leaves tracker-owned `CW_REF` unchanged, and rejects any request
-  that also enables promotion.
+  private clone contains that exact commit and that it is an ancestor of the
+  freshly cloned `origin/main`, records it in the immutable tag and evidence,
+  leaves tracker-owned `CW_REF` unchanged, and rejects any request that also
+  enables promotion.
 - `track-cw.yml` follows CodingWorkspace's `release` branch. When that branch
   moves, the tracker updates `CW_REF` and explicitly dispatches a trusted build
   with promotion enabled. That dispatch is the normal and only automatic path
@@ -196,6 +197,13 @@ is retained for 90 days only as a transfer window. Before production,
 operations must verify the checksums and copy the exact bundle into the
 course's independently backed-up, indefinite release record.
 
+An actual CodingWorkspace promotion attempt produces a second, separately
+checksummed receipt artifact after the tag operation. It records the tested
+digest, prior tags, every promotion and rollback target/readback, final tag
+digests, exact workflow/source identifiers, and the success, rollback, or
+incomplete-rollback outcome. The receipt is uploaded after both successful and
+failed attempts; candidate and non-promoting builds do not create one.
+
 See [PIPELINE.md](PIPELINE.md) for credentials, promotion, rollback, and failure
 handling.
 
@@ -230,9 +238,11 @@ gh workflow run build.yml --repo ubc/jupyter-images --ref main \
   -f codingworkspace_candidate_sha=0123456789abcdef0123456789abcdef01234567
 ```
 
-Replace the example SHA with the intended private-repository commit. Candidate
-overrides are evidence-producing tests only; advance the CodingWorkspace
-`release` branch and let `track-cw.yml` update `CW_REF` for an accepted release.
+Replace the example SHA with the intended private-repository `main` commit. It
+may be behind the current `origin/main` tip, but it cannot be an unmerged side-
+branch commit. Candidate overrides are evidence-producing tests only; advance
+the CodingWorkspace `release` branch and let `track-cw.yml` update `CW_REF` for
+an accepted release.
 
 On a Docker host that permits unprivileged user, mount, and PID namespaces, run:
 

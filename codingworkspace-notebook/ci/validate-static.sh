@@ -85,6 +85,7 @@ PY
 python3 codingworkspace-notebook/ci/validate_ci_policy.py
 python3 codingworkspace-notebook/ci/test_prepare_git_context.py -v
 python3 codingworkspace-notebook/ci/test_select_cw_build_ref.py -v
+python3 codingworkspace-notebook/ci/test_verify_cw_candidate.py -v
 python3 codingworkspace-notebook/ci/test_update_opencode_release.py -v
 
 expected_host_fingerprint='SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'

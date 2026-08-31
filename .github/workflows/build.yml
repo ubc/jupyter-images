@@ -258,6 +258,15 @@ jobs:
           git -C "$cwsrc" cat-file -e "${CW_REF}^{commit}"
           resolved_cw_ref=$(git -C "$cwsrc" rev-parse --verify "${CW_REF}^{commit}")
           test "$resolved_cw_ref" = "$CW_REF"
+          if [ "${CW_CANDIDATE_OVERRIDE:-false}" = true ]; then
+            test "${CW_CANDIDATE_SHA:-}" = "$CW_REF"
+            # A manual candidate may test an unreleased main commit, but it
+            # cannot use an unmerged side-branch or otherwise injected object.
+            python3 codingworkspace-notebook/ci/verify_cw_candidate.py \
+              "$cwsrc" "$CW_CANDIDATE_SHA"
+          else
+            test -z "${CW_CANDIDATE_SHA:-}"
+          fi
           git -C "$cwsrc" checkout --quiet --detach "$CW_REF"
           test "$(git -C "$cwsrc" rev-parse HEAD)" = "$CW_REF"
 
@@ -474,7 +483,9 @@ jobs:
       # a transfer window; production separately requires checksum verification
       # and transfer into the course's independently backed-up release record.
       - name: Promote approved CodingWorkspace release
+        id: promote_codingworkspace
         if: >-
+          success() &&
           matrix.image == 'codingworkspace-notebook' &&
           github.event_name == 'workflow_dispatch' &&
           inputs.promote_codingworkspace == true &&
@@ -482,6 +493,17 @@ jobs:
           env.CW_CANDIDATE_OVERRIDE != 'true'
         run: |
           set -euo pipefail
+          record_receipt_field() {
+            local key="$1"
+            local value="$2"
+            case "$key" in
+              *[!A-Z0-9_]*) echo "Invalid promotion receipt field: $key" >&2; return 1 ;;
+            esac
+            case "$value" in
+              *$'\n'* | *$'\r'*) echo "Invalid multiline promotion receipt value" >&2; return 1 ;;
+            esac
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
+          }
           digest_for_tag() {
             aws ecr describe-images \
               --repository-name "$IMAGE_NAME" \
@@ -490,21 +512,94 @@ jobs:
               --output text 2>/dev/null || true
           }
           move_and_verify() {
-            local tag="$1"
-            local digest="$2"
+            local phase="$1"
+            local tag="$2"
+            local digest="$3"
             local observed=""
+            local prefix=""
+            case "$phase:$tag" in
+              promotion:latest) prefix=PROMOTION_LATEST ;;
+              promotion:preview) prefix=PROMOTION_PREVIEW ;;
+              rollback:latest) prefix=ROLLBACK_LATEST ;;
+              rollback:preview) prefix=ROLLBACK_PREVIEW ;;
+              *) echo "Invalid promotion move phase/tag: $phase/$tag" >&2; return 1 ;;
+            esac
+            record_receipt_field "${prefix}_ATTEMPTED_DIGEST" "$digest"
             docker buildx imagetools create --tag "$ECR_REPOSITORY:$tag" "$ECR_REPOSITORY@$digest"
             for attempt in $(seq 1 12); do
               observed=$(digest_for_tag "$tag")
-              [ "$observed" = "$digest" ] && return 0
+              if [ "$observed" = "$digest" ]; then
+                record_receipt_field "${prefix}_READBACK_DIGEST" "$observed"
+                return 0
+              fi
               sleep 5
             done
+            record_receipt_field "${prefix}_READBACK_DIGEST" "${observed:-not-observed}"
             echo "$tag resolved to $observed, expected $digest" >&2
             return 1
           }
 
+          rollback_armed=false
+          previous_latest=not-observed
+          previous_preview=not-observed
+          finalize_promotion() {
+            local status=$?
+            local final_latest=""
+            local final_preview=""
+            local outcome=""
+            trap - EXIT
+            set +e
+
+            final_latest=$(digest_for_tag latest)
+            final_preview=$(digest_for_tag preview)
+            if [ "$status" -eq 0 ] && {
+              [ "$final_latest" != "$IMAGE_DIGEST" ] ||
+              [ "$final_preview" != "$IMAGE_DIGEST" ];
+            }; then
+              echo "Final promotion readback did not retain the tested digest." >&2
+              status=1
+            fi
+
+            if [ "$status" -ne 0 ] && [ "$rollback_armed" = true ]; then
+              echo "Promotion failed; restoring previous moving-tag digests." >&2
+              move_and_verify rollback latest "$previous_latest" || true
+              move_and_verify rollback preview "$previous_preview" || true
+              final_latest=$(digest_for_tag latest)
+              final_preview=$(digest_for_tag preview)
+              if [ "$final_latest" = "$previous_latest" ] && \
+                 [ "$final_preview" = "$previous_preview" ]; then
+                outcome=failed_rolled_back
+              else
+                outcome=failed_rollback_incomplete
+              fi
+            elif [ "$status" -eq 0 ]; then
+              outcome=promoted
+            else
+              outcome=failed_before_tag_moves
+            fi
+
+            if [ "$status" -ne 0 ]; then
+              record_receipt_field CODINGWORKSPACE_LATEST_MOVED false
+              record_receipt_field CODINGWORKSPACE_PREVIEW_MOVED false
+            fi
+            record_receipt_field PROMOTION_FINAL_LATEST_DIGEST "${final_latest:-not-observed}"
+            record_receipt_field PROMOTION_FINAL_PREVIEW_DIGEST "${final_preview:-not-observed}"
+            record_receipt_field PROMOTION_OUTCOME "$outcome"
+            record_receipt_field PROMOTION_STEP_EXIT_STATUS "$status"
+            exit "$status"
+          }
+          trap finalize_promotion EXIT
+
+          record_receipt_field PROMOTION_RECEIPT_STARTED true
+          record_receipt_field PROMOTION_TESTED_DIGEST "$IMAGE_DIGEST"
+          record_receipt_field PROMOTION_OUTCOME started
+          record_receipt_field CODINGWORKSPACE_LATEST_MOVED false
+          record_receipt_field CODINGWORKSPACE_PREVIEW_MOVED false
+
           previous_latest=$(digest_for_tag latest)
           previous_preview=$(digest_for_tag preview)
+          record_receipt_field PROMOTION_PREVIOUS_LATEST_DIGEST "${previous_latest:-not-observed}"
+          record_receipt_field PROMOTION_PREVIOUS_PREVIEW_DIGEST "${previous_preview:-not-observed}"
           case "$previous_latest" in
             sha256:????????????????????????????????????????????????????????????????) ;;
             *) echo "latest has no rollback-safe immutable digest: $previous_latest" >&2; exit 1 ;;
@@ -513,27 +608,82 @@ jobs:
             sha256:????????????????????????????????????????????????????????????????) ;;
             *) echo "preview has no rollback-safe immutable digest: $previous_preview" >&2; exit 1 ;;
           esac
+          rollback_armed=true
 
-          restore_previous_tags() {
-            local status=$?
-            trap - EXIT
-            if [ "$status" -ne 0 ]; then
-              echo "Promotion failed; restoring previous moving-tag digests." >&2
-              move_and_verify latest "$previous_latest" || status=1
-              move_and_verify preview "$previous_preview" || status=1
-            fi
-            exit "$status"
-          }
-          trap restore_previous_tags EXIT
-
-          move_and_verify latest "$IMAGE_DIGEST"
-          printf 'CODINGWORKSPACE_LATEST_MOVED=true\n' >> "$GITHUB_ENV"
+          move_and_verify promotion latest "$IMAGE_DIGEST"
+          record_receipt_field CODINGWORKSPACE_LATEST_MOVED true
 
           # Preview is the Hub-consumed moving tag, so update it last and only
           # after latest has been observed at the tested digest.
-          move_and_verify preview "$IMAGE_DIGEST"
-          printf 'CODINGWORKSPACE_PREVIEW_MOVED=true\n' >> "$GITHUB_ENV"
-          trap - EXIT
+          move_and_verify promotion preview "$IMAGE_DIGEST"
+          record_receipt_field CODINGWORKSPACE_PREVIEW_MOVED true
+
+      - name: Record CodingWorkspace promotion receipt
+        if: >-
+          always() &&
+          matrix.image == 'codingworkspace-notebook' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.promote_codingworkspace == true &&
+          inputs.codingworkspace_candidate_sha == '' &&
+          env.CW_CANDIDATE_OVERRIDE != 'true' &&
+          env.PROMOTION_RECEIPT_STARTED == 'true'
+        run: |
+          set -euo pipefail
+          install -d -m 0700 promotion-receipt
+          {
+            printf 'receipt_version=1\n'
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'workflow=%s\n' "$GITHUB_WORKFLOW"
+            printf 'workflow_ref=%s\n' "$GITHUB_WORKFLOW_REF"
+            printf 'workflow_sha=%s\n' "$GITHUB_WORKFLOW_SHA"
+            printf 'workflow_run=%s/actions/runs/%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'workflow_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'event_name=%s\n' "$GITHUB_EVENT_NAME"
+            printf 'ref=%s\n' "$GITHUB_REF"
+            printf 'jupyter_images_commit=%s\n' "$GITHUB_SHA"
+            printf 'codingworkspace_commit=%s\n' "$CW_REF"
+            printf 'codingworkspace_tracked_commit=%s\n' "$CW_TRACKED_REF"
+            printf 'gizmoapp_commit=%s\n' "$GIZMOAPP_REF"
+            printf 'image_repository=%s\n' "$ECR_REPOSITORY"
+            printf 'immutable_tag=%s\n' "$IMMUTABLE_TAG"
+            printf 'tested_digest=%s\n' "$PROMOTION_TESTED_DIGEST"
+            printf 'previous_latest_digest=%s\n' "${PROMOTION_PREVIOUS_LATEST_DIGEST:-not-recorded}"
+            printf 'previous_preview_digest=%s\n' "${PROMOTION_PREVIOUS_PREVIEW_DIGEST:-not-recorded}"
+            printf 'promotion_latest_attempted_digest=%s\n' "${PROMOTION_LATEST_ATTEMPTED_DIGEST:-not-attempted}"
+            printf 'promotion_latest_readback_digest=%s\n' "${PROMOTION_LATEST_READBACK_DIGEST:-not-observed}"
+            printf 'promotion_preview_attempted_digest=%s\n' "${PROMOTION_PREVIEW_ATTEMPTED_DIGEST:-not-attempted}"
+            printf 'promotion_preview_readback_digest=%s\n' "${PROMOTION_PREVIEW_READBACK_DIGEST:-not-observed}"
+            printf 'rollback_latest_attempted_digest=%s\n' "${ROLLBACK_LATEST_ATTEMPTED_DIGEST:-not-attempted}"
+            printf 'rollback_latest_readback_digest=%s\n' "${ROLLBACK_LATEST_READBACK_DIGEST:-not-observed}"
+            printf 'rollback_preview_attempted_digest=%s\n' "${ROLLBACK_PREVIEW_ATTEMPTED_DIGEST:-not-attempted}"
+            printf 'rollback_preview_readback_digest=%s\n' "${ROLLBACK_PREVIEW_READBACK_DIGEST:-not-observed}"
+            printf 'final_latest_digest=%s\n' "${PROMOTION_FINAL_LATEST_DIGEST:-not-observed}"
+            printf 'final_preview_digest=%s\n' "${PROMOTION_FINAL_PREVIEW_DIGEST:-not-observed}"
+            printf 'outcome=%s\n' "${PROMOTION_OUTCOME:-unknown}"
+            printf 'promotion_step_exit_status=%s\n' "${PROMOTION_STEP_EXIT_STATUS:-unknown}"
+            printf 'promotion_step_result=%s\n' "${{ steps.promote_codingworkspace.outcome }}"
+            printf 'actions_artifact_retention_days=90\n'
+          } > promotion-receipt/codingworkspace-promotion.txt
+          (
+            cd promotion-receipt
+            sha256sum codingworkspace-promotion.txt > SHA256SUMS
+          )
+
+      - name: Upload CodingWorkspace promotion receipt
+        if: >-
+          always() &&
+          matrix.image == 'codingworkspace-notebook' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.promote_codingworkspace == true &&
+          inputs.codingworkspace_candidate_sha == '' &&
+          env.CW_CANDIDATE_OVERRIDE != 'true' &&
+          env.PROMOTION_RECEIPT_STARTED == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codingworkspace-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-promotion-receipt
+          path: promotion-receipt/
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Summarize verified moving tags
         if: always()

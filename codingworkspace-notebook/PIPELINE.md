@@ -18,7 +18,8 @@ reviewed jupyter-images main push touching CodingWorkspace
                                                      (CodingWorkspace preview/latest stay put)
 
 reviewed jupyter-images main workflow_dispatch with an optional exact CW SHA
-  └─ validate full lowercase commit in private clone → build/push/scan candidate
+  └─ validate full lowercase commit reachable from private origin/main
+       → build/push/scan candidate
        (CW_REF is unchanged; promotion is categorically refused)
 
 ordinary-image branch/tag push
@@ -114,10 +115,12 @@ changing `CW_REF`, and it has no authority to move `preview` or `latest`.
 The hardened job also accepts an optional `codingworkspace_candidate_sha` only
 on a trusted `workflow_dispatch` of reviewed `main`. The value must be exactly
 40 lowercase hexadecimal characters and must resolve to that exact commit in
-the credentialed private clone. The workflow retains the tracker-owned
-`CW_REF`, marks the build as an override, and fails before publication if the
-same request asks for `promote_codingworkspace=true`. The promotion step has a
-second independent condition that excludes every nonempty candidate input.
+the credentialed private clone. It must also be reachable from the freshly
+cloned `refs/remotes/origin/main`; an object available only through an unmerged
+branch is rejected. The workflow retains the tracker-owned `CW_REF`, marks the
+build as an override, and fails before publication if the same request asks for
+`promote_codingworkspace=true`. The promotion step has a second independent
+condition that excludes every nonempty candidate input.
 
 For `codingworkspace-notebook`, both `latest` and `preview` require reviewed
 `main`, all image gates, and a trusted `workflow_dispatch` with `publish=true`
@@ -147,7 +150,7 @@ condition in branch YAML.
 | Input | Resolution and verification |
 | --- | --- |
 | jupyter-images | The checked-out full `GITHUB_SHA` on reviewed `main` |
-| CodingWorkspace | Normally the tracker-owned lowercase 40-character SHA in `CW_REF`, which on `jupyter-images` main equals the CodingWorkspace `release` head. An explicit main-only manual candidate may instead select a different full lowercase SHA without editing `CW_REF`; it is non-promoting. In both cases the private clone uses `CW_DEPLOY_KEY`, the selected object must be that exact SHA-1 commit, and detached checkout must equal it. |
+| CodingWorkspace | Normally the tracker-owned lowercase 40-character SHA in `CW_REF`, which on `jupyter-images` main equals the CodingWorkspace `release` head. An explicit main-only manual candidate may instead select a different full lowercase SHA without editing `CW_REF`; it is non-promoting and must be reachable from the fresh private clone's `origin/main`. In both cases the private clone uses `CW_DEPLOY_KEY`, the selected object must be that exact SHA-1 commit, and detached checkout must equal it. |
 | GizmoApp | Exactly one lowercase 40-character SHA in `GIZMOAPP_REF`; credential-free public clone; detached checkout must equal that SHA and use SHA-1 object format |
 | Base image | Version tag plus `sha256` digest in `Dockerfile` |
 | OpenCode and other runtime tools | Fixed versions/checksums in reviewed image pin files |
@@ -225,6 +228,15 @@ immutable candidate already pushed may remain for diagnosis. A release reviewer
 must still triage noncritical and unfixed findings and record accepted exceptions
 with an owner and expiry; the automatic threshold is a floor, not a declaration
 that the full report is safe.
+
+The pre-promotion evidence upload remains a hard gate before either moving tag.
+Once an authorized promotion step actually begins, a separate promotion receipt
+is uploaded even when the move fails and rollback runs. Its receipt file and
+own `SHA256SUMS` record the tested digest; prior, attempted, read-back, and final
+`latest`/`preview` digests; rollback attempts; exact workflow/ref/source
+identifiers; and a `promoted`, `failed_rolled_back`,
+`failed_rollback_incomplete`, or pre-move failure outcome. No receipt is created
+for an ordinary candidate or an exact-SHA override.
 
 The Actions artifact expires after 90 days and is not the course record. Before
 the accepted digest can enter the production Hub configuration, verify
@@ -347,7 +359,8 @@ bound age. Restarting Jupyter does not reset the claimed credential age.
 3. Advance CodingWorkspace `release` to the approved source commit. Within 15
    minutes `track-cw.yml` updates `CW_REF` and dispatches the one promotion
    build. A manual tracker run avoids the wait.
-4. Confirm the tracker and dispatched build are green. Run the namespace and
+4. Confirm the tracker and dispatched build are green, and verify the separate
+   promotion receipt checksum and `promoted` outcome. Run the namespace and
    lifecycle tests against the resulting exact digest. The automated gate must
    show no fixable CRITICAL finding; resolve other findings or record a
    reviewed, expiring exception.
@@ -387,11 +400,12 @@ gh workflow run build.yml --repo ubc/jupyter-images --ref main \
   -f codingworkspace_candidate_sha=0123456789abcdef0123456789abcdef01234567
 ```
 
-Replace the example with the intended commit. The run fails if the SHA is
-malformed, absent from the private clone, not itself a commit, or combined with
-promotion. It does not edit `CW_REF`; review the immutable digest and evidence,
-then advance CodingWorkspace `release` through the normal tracker path if the
-candidate is accepted.
+Replace the example with the intended `main` commit. The run fails if the SHA is
+malformed, absent from the private clone, not itself a commit, not reachable
+from the freshly cloned `origin/main`, or combined with promotion. It does not
+edit `CW_REF`; review the immutable digest and evidence, then advance
+CodingWorkspace `release` through the normal tracker path if the candidate is
+accepted.
 
 Manual promotion is intentionally possible only as an explicit trusted
 dispatch of `main`; normally use the tracker so `CW_REF` is first reconciled to
@@ -437,6 +451,8 @@ Expected promotion evidence:
 - contract/SBOM/Trivy steps passed;
 - `SHA256SUMS` validates the all-severity report, gate report, SBOM, release
   metadata, and `published-image.txt`;
+- the separate promotion receipt's `SHA256SUMS` validates, its outcome is
+  `promoted`, and its prior/attempted/read-back/final tag digests are coherent;
 - `preview` and the immutable tag resolve to the recorded digest; and
 - the full GizmoApp pin in the artifact matches `GIZMOAPP_REF`.
 
@@ -461,7 +477,7 @@ runbook.
 | Fork PR asks for AWS or fails because a secret is absent | Workflow regression: PR validation must not enter the trusted publish job |
 | Static validation rejects an Action | Resolve the desired upstream release and review/pin its full commit; do not switch to a floating tag |
 | Tracker cannot clone CodingWorkspace | Check the read-only deploy key, the pinned GitHub host key, and repository access; never weaken strict host checking |
-| Exact-SHA candidate is rejected before build | Supply one lowercase 40-character commit available in the private clone, dispatch reviewed `main`, and keep `promote_codingworkspace=false`; never change `CW_REF` merely to test it |
+| Exact-SHA candidate is rejected before build | Supply one lowercase 40-character commit reachable from the freshly cloned private `origin/main`, dispatch reviewed `main`, and keep `promote_codingworkspace=false`; never change `CW_REF` merely to test it |
 | Tracker push loses a race | No force/rebase is used; the next scheduled run retries from fresh `main` |
 | OpenCode update PR is not merged | Inspect its dispatched validation and branch-protection requirements; the next schedule revalidates and retries the exact open PR head |
 | No eligible OpenCode update is proposed | Expected while newer stable releases are inside the 48-hour soak, lack both required published digests/assets, or are not newer than the pin |
@@ -473,6 +489,7 @@ runbook.
 | Fixable CRITICAL Trivy gate fails | Candidate remains unpromoted. Patch the image or document a deliberately reviewed policy change; do not disable the complete report |
 | Trivy report contains noncritical or unfixed findings but workflow is green | The automatic floor passed; human triage is still required before production |
 | Evidence has not reached the independent release record | Stop production promotion. Verify `SHA256SUMS`, transfer the exact bundle, and record its indefinite-storage location; the 90-day artifact is only a handoff window |
+| Promotion receipt says rollback was incomplete or is missing after an attempted move | Treat registry state as unresolved, inspect both tags directly, preserve the run evidence, and do not deploy until an operator reconciles them to accepted immutable digests |
 | Lifecycle smoke fails only at Bubblewrap | The test host/pod cannot provide the required namespace boundary; production remains blocked until the real image/profile probe passes |
 | Startup returns diagnostic 503 | Inspect the credential-safe `CW_ALERT`/reference; repair config or quarantine forbidden stale state. Do not enable the forbidden feature or delete ambiguous data automatically |
 | Students see old behavior | Their server predates the image. Use Hub Control Panel Stop/Start; do not delete the PVC |

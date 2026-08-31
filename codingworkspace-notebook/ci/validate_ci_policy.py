@@ -20,6 +20,9 @@ LOCAL_SCAN = (ROOT / "codingworkspace-notebook/ci/scan-local-image.sh").read_tex
     encoding="utf-8"
 )
 DOCKERFILE = (ROOT / "codingworkspace-notebook/Dockerfile").read_text(encoding="utf-8")
+VERIFY_CANDIDATE = (
+    ROOT / "codingworkspace-notebook/ci/verify_cw_candidate.py"
+).read_text(encoding="utf-8")
 
 EXPECTED_ACTIONS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -179,6 +182,34 @@ for required in (
 ):
     if required not in source_resolution:
         raise SystemExit(f"candidate commit is not exactly verified in the private clone: {required}")
+candidate_reachability_guard = re.search(
+    r'(?ms)if \[ "\$\{CW_CANDIDATE_OVERRIDE:-false\}" = true \]; then'
+    r'.*?test "\$\{CW_CANDIDATE_SHA:-\}" = "\$CW_REF"'
+    r'.*?verify_cw_candidate\.py.*?"\$cwsrc" "\$CW_CANDIDATE_SHA"'
+    r'.*?else.*?test -z "\$\{CW_CANDIDATE_SHA:-\}".*?fi',
+    source_resolution,
+)
+if not candidate_reachability_guard:
+    raise SystemExit(
+        "candidate origin/main reachability is not isolated to candidate overrides"
+    )
+if source_resolution.count("verify_cw_candidate.py") != 1:
+    raise SystemExit("candidate reachability must be verified exactly once after private clone")
+if not (
+    source_resolution.find("git clone --quiet --no-tags git@github.com:kevinlb1/CodingWorkspace.git")
+    < source_resolution.find("verify_cw_candidate.py")
+    < source_resolution.find('checkout --quiet --detach "$CW_REF"')
+):
+    raise SystemExit("candidate reachability is not checked in the fresh clone before checkout")
+for required in (
+    'ORIGIN_MAIN = "refs/remotes/origin/main"',
+    '"merge-base",',
+    '"--is-ancestor",',
+    "candidate SHA is not reachable from the freshly cloned origin/main",
+    'object_format != "sha1"',
+):
+    if required not in VERIFY_CANDIDATE:
+        raise SystemExit(f"candidate reachability helper is missing {required}")
 for forbidden in ("update_pin.py", "git add", "git commit", "git push"):
     if forbidden in publish_job_text:
         raise SystemExit(f"the build job may not modify tracker-owned CW_REF: {forbidden}")
@@ -206,16 +237,26 @@ for required in (
 
 promotion = step(BUILD, "Promote approved CodingWorkspace release")
 for required in (
+    "id: promote_codingworkspace",
+    "success()",
     "matrix.image == 'codingworkspace-notebook'",
     "github.event_name == 'workflow_dispatch'",
     "inputs.promote_codingworkspace == true",
     "inputs.codingworkspace_candidate_sha == ''",
     "env.CW_CANDIDATE_OVERRIDE != 'true'",
-    "move_and_verify latest",
-    "move_and_verify preview",
+    'move_and_verify promotion latest "$IMAGE_DIGEST"',
+    'move_and_verify promotion preview "$IMAGE_DIGEST"',
     "previous_latest",
     "previous_preview",
-    "restore_previous_tags",
+    "finalize_promotion",
+    'move_and_verify rollback latest "$previous_latest"',
+    'move_and_verify rollback preview "$previous_preview"',
+    "PROMOTION_RECEIPT_STARTED",
+    "PROMOTION_FINAL_LATEST_DIGEST",
+    "PROMOTION_FINAL_PREVIEW_DIGEST",
+    "PROMOTION_OUTCOME",
+    "failed_rolled_back",
+    "failed_rollback_incomplete",
 ):
     if required not in promotion:
         raise SystemExit(f"CodingWorkspace promotion step is missing {required}")
@@ -288,6 +329,8 @@ ordered_steps = (
     "Record release evidence",
     "Upload build, SBOM, and vulnerability evidence",
     "Promote approved CodingWorkspace release",
+    "Record CodingWorkspace promotion receipt",
+    "Upload CodingWorkspace promotion receipt",
 )
 positions = [BUILD.find(f"      - name: {name}") for name in ordered_steps]
 if any(position < 0 for position in positions) or positions != sorted(positions):
@@ -308,13 +351,13 @@ for required in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "-gz${GIZMOAPP_REF:0:7}"
 for tag in ("latest", "preview"):
     if f"previous_{tag}=$(digest_for_tag {tag})" not in promotion:
         raise SystemExit(f"CodingWorkspace promotion does not retain the {tag} digest")
-    if f'move_and_verify {tag} "$IMAGE_DIGEST"' not in promotion:
+    if f'move_and_verify promotion {tag} "$IMAGE_DIGEST"' not in promotion:
         raise SystemExit(f"CodingWorkspace promotion does not verify the {tag} digest")
-if promotion.find('move_and_verify latest "$IMAGE_DIGEST"') > promotion.find(
-    'move_and_verify preview "$IMAGE_DIGEST"'
+if promotion.find('move_and_verify promotion latest "$IMAGE_DIGEST"') > promotion.find(
+    'move_and_verify promotion preview "$IMAGE_DIGEST"'
 ):
     raise SystemExit("CodingWorkspace preview can move before latest is verified")
-if "CODINGWORKSPACE_PREVIEW_MOVED=true" not in promotion:
+if "record_receipt_field CODINGWORKSPACE_PREVIEW_MOVED true" not in promotion:
     raise SystemExit("workflow cannot distinguish completed preview promotion")
 
 evidence = step(BUILD, "Record release evidence")
@@ -338,6 +381,58 @@ upload = step(BUILD, "Upload build, SBOM, and vulnerability evidence")
 for required in ("github.run_id", "github.run_attempt", "if: always()"):
     if required not in upload:
         raise SystemExit(f"failure/rerun evidence handling is missing {required}")
+
+promotion_receipt = step(BUILD, "Record CodingWorkspace promotion receipt")
+promotion_receipt_upload = step(BUILD, "Upload CodingWorkspace promotion receipt")
+for receipt_step, description in (
+    (promotion_receipt, "promotion receipt"),
+    (promotion_receipt_upload, "promotion receipt upload"),
+):
+    for required in (
+        "always()",
+        "matrix.image == 'codingworkspace-notebook'",
+        "github.event_name == 'workflow_dispatch'",
+        "inputs.promote_codingworkspace == true",
+        "inputs.codingworkspace_candidate_sha == ''",
+        "env.CW_CANDIDATE_OVERRIDE != 'true'",
+        "env.PROMOTION_RECEIPT_STARTED == 'true'",
+    ):
+        if required not in receipt_step:
+            raise SystemExit(f"{description} gate is missing {required}")
+for required in (
+    "workflow_ref",
+    "workflow_sha",
+    "jupyter_images_commit",
+    "codingworkspace_commit",
+    "codingworkspace_tracked_commit",
+    "gizmoapp_commit",
+    "tested_digest",
+    "previous_latest_digest",
+    "previous_preview_digest",
+    "promotion_latest_attempted_digest",
+    "promotion_latest_readback_digest",
+    "promotion_preview_attempted_digest",
+    "promotion_preview_readback_digest",
+    "rollback_latest_attempted_digest",
+    "rollback_latest_readback_digest",
+    "rollback_preview_attempted_digest",
+    "rollback_preview_readback_digest",
+    "final_latest_digest",
+    "final_preview_digest",
+    "outcome",
+    "promotion_step_result",
+    "sha256sum codingworkspace-promotion.txt > SHA256SUMS",
+):
+    if required not in promotion_receipt:
+        raise SystemExit(f"post-promotion receipt is missing {required}")
+for required in (
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "promotion-receipt",
+    "if-no-files-found: error",
+    "retention-days: 90",
+):
+    if required not in promotion_receipt_upload:
+        raise SystemExit(f"post-promotion receipt upload is missing {required}")
 vulnerability_report = step(BUILD, "Generate vulnerability report")
 for required in (
     "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
