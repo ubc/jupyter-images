@@ -136,8 +136,14 @@ jobs:
           registry="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           repository="$registry/$IMAGE_NAME"
           tag="${GITHUB_SHA::7}"
-          aws ecr describe-repositories --repository-names "$IMAGE_NAME" >/dev/null 2>&1 \
-            || aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null
+          # Creating the repository is best-effort. The publication role may be
+          # able to push without holding ecr:DescribeRepositories, in which case
+          # the describe fails even though the repository exists and the create
+          # then fails with RepositoryAlreadyExistsException. Neither is fatal;
+          # a genuinely missing repository still surfaces on the push below.
+          if ! aws ecr describe-repositories --repository-names "$IMAGE_NAME" >/dev/null 2>&1; then
+            aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null 2>&1 || true
+          fi
           docker buildx build --load -f "$IMAGE_NAME/Dockerfile" -t "$repository:$tag" .
           docker push "$repository:$tag"
           docker tag "$repository:$tag" "$repository:latest"
@@ -247,8 +253,14 @@ jobs:
           registry="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           ecr_image="${registry}/${IMAGE_NAME}:${tag}"
           local_image="local/${IMAGE_NAME}:${GITHUB_SHA::7}"
-          aws ecr describe-repositories --repository-names "$IMAGE_NAME" >/dev/null 2>&1 \
-            || aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null
+          # Creating the repository is best-effort. The publication role may be
+          # able to push without holding ecr:DescribeRepositories, in which case
+          # the describe fails even though the repository exists and the create
+          # then fails with RepositoryAlreadyExistsException. Neither is fatal;
+          # a genuinely missing repository still surfaces on the push below.
+          if ! aws ecr describe-repositories --repository-names "$IMAGE_NAME" >/dev/null 2>&1; then
+            aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null 2>&1 || true
+          fi
           printf 'IMMUTABLE_TAG=%s\n' "$tag" >> "$GITHUB_ENV"
           printf 'ECR_REPOSITORY=%s/%s\n' "$registry" "$IMAGE_NAME" >> "$GITHUB_ENV"
           printf 'ECR_IMAGE=%s\n' "$ecr_image" >> "$GITHUB_ENV"
