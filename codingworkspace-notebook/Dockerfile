@@ -45,13 +45,15 @@ RUN set -eux; \
     curl --fail --location --retry 5 --output "${opencode_archive}" \
         "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${opencode_arch}.tar.gz"; \
     printf '%s  %s\n' "${opencode_sha256}" "${opencode_archive}" | sha256sum --check --strict; \
-    tar --extract --gzip --file "${opencode_archive}" --directory /tmp --no-same-owner opencode; \
-    install --owner=root --group=root --mode=0755 /tmp/opencode /usr/local/bin/opencode; \
+    mkdir -p /tmp/opencode-dist; \
+    tar --extract --gzip --file "${opencode_archive}" --directory /tmp/opencode-dist --no-same-owner opencode; \
+    install --owner=root --group=root --mode=0755 /tmp/opencode-dist/opencode /usr/local/bin/opencode; \
     test "$(node --version)" = "v${NODE_VERSION}"; \
     test "$(opencode --version)" = "${OPENCODE_VERSION}"; \
     bwrap --version; \
     apt-get clean; \
-    rm -f "${node_archive}" "${opencode_archive}" /tmp/opencode /tmp/codingworkspace-runtime-pins.env; \
+    rm -rf "${node_archive}" "${opencode_archive}" /tmp/opencode-dist /tmp/opencode \
+        /tmp/codingworkspace-runtime-pins.env; \
     rm -rf /var/lib/apt/lists/*
 
 # CodingWorkspace handles imports. install-common.sh is intentionally omitted:
