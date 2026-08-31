@@ -6,6 +6,7 @@ FROM ${BASE_CONTAINER}
 
 ARG TARGETARCH
 ARG CW_REF
+ARG CW_CANDIDATE_SHA
 ARG GIZMOAPP_REF
 ARG OPENCODE_VERSION
 LABEL course="AI100" \
@@ -66,16 +67,22 @@ COPY --chown=${NB_UID}:${NB_GID} --chmod=0444 \
 USER ${NB_UID}
 RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
     set -eux; \
-    expected_ref="$(sed -e 's/[[:space:]]//g' -e '/^$/d' -e '/^#/d' /tmp/CW_REF)"; \
-    test "${#expected_ref}" -eq 40; \
-    printf '%s' "${expected_ref}" | grep -Eq '^[0-9a-f]{40}$'; \
-    test "${CW_REF}" = "${expected_ref}"; \
-    test "$(git bundle list-heads /cwsrc/source.bundle)" = "${expected_ref} HEAD"; \
+    tracked_ref="$(sed -e 's/[[:space:]]//g' -e '/^$/d' -e '/^#/d' /tmp/CW_REF)"; \
+    test "${#tracked_ref}" -eq 40; \
+    printf '%s' "${tracked_ref}" | grep -Eq '^[0-9a-f]{40}$'; \
+    build_ref="${tracked_ref}"; \
+    if [ -n "${CW_CANDIDATE_SHA}" ]; then \
+        test "${#CW_CANDIDATE_SHA}" -eq 40; \
+        printf '%s' "${CW_CANDIDATE_SHA}" | grep -Eq '^[0-9a-f]{40}$'; \
+        build_ref="${CW_CANDIDATE_SHA}"; \
+    fi; \
+    test "${CW_REF}" = "${build_ref}"; \
+    test "$(git bundle list-heads /cwsrc/source.bundle)" = "${build_ref} HEAD"; \
     git clone --quiet --no-local /cwsrc/source.bundle /tmp/cwrepo; \
-    test "$(git -C /tmp/cwrepo rev-parse HEAD)" = "${expected_ref}"; \
+    test "$(git -C /tmp/cwrepo rev-parse HEAD)" = "${build_ref}"; \
     test "$(git -C /tmp/cwrepo rev-parse --is-shallow-repository)" = "false"; \
     mkdir -p /tmp/cwbuild; \
-    git -C /tmp/cwrepo archive --format=tar "${expected_ref}" \
+    git -C /tmp/cwrepo archive --format=tar "${build_ref}" \
         | tar -C /tmp/cwbuild -xf -; \
     pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes \
         --requirement /tmp/proxy-requirements.txt; \

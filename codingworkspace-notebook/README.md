@@ -125,7 +125,7 @@ The trusted build resolves three reviewed inputs:
 | Input | Pin / source |
 | --- | --- |
 | Notebook base | Digest-pinned `quay.io/jupyter/base-notebook:hub-5.5.0` in `Dockerfile` |
-| CodingWorkspace | Tracker-owned full SHA in `CW_REF`, equal to the CodingWorkspace `release` head on `jupyter-images` main; private source is cloned with the read-only deploy key and converted to a bundle-only `cwsrc` build context |
+| CodingWorkspace | Normally the tracker-owned full SHA in `CW_REF`, equal to the CodingWorkspace `release` head on `jupyter-images` main. A reviewed-main manual dispatch may provide a separate exact full-SHA candidate without editing `CW_REF`, but that override can never promote. Private source is cloned with the read-only deploy key and converted to a bundle-only `cwsrc` build context. |
 | GizmoApp starter | Full SHA in `GIZMOAPP_REF`; public source is cloned and converted to a bundle-only `gizmosrc` build context |
 
 The GizmoApp checkout is baked at
@@ -155,6 +155,11 @@ requirements and both architecture checks together.
 - A reviewed image-source push to `main` builds CodingWorkspace with the
   currently released source pin and may publish an immutable candidate. It
   **does not** move `preview` or `latest`.
+- A trusted manual dispatch of reviewed `main` may supply an exact lowercase
+  40-character `codingworkspace_candidate_sha`. The workflow verifies that the
+  private clone contains that exact commit, records it in the immutable tag and
+  evidence, leaves tracker-owned `CW_REF` unchanged, and rejects any request
+  that also enables promotion.
 - `track-cw.yml` follows CodingWorkspace's `release` branch. When that branch
   moves, the tracker updates `CW_REF` and explicitly dispatches a trusted build
   with promotion enabled. That dispatch is the normal and only automatic path
@@ -213,6 +218,21 @@ codingworkspace-notebook/ci/smoke-image.sh contract \
   IMAGE "$(codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/CW_REF)" \
   "$(codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/GIZMOAPP_REF)"
 ```
+
+An operator can build and scan one committed, unreleased CodingWorkspace
+candidate through the trusted workflow without changing the release pin:
+
+```bash
+gh workflow run build.yml --repo ubc/jupyter-images --ref main \
+  -f publish=true \
+  -f scope=codingworkspace-notebook \
+  -f promote_codingworkspace=false \
+  -f codingworkspace_candidate_sha=0123456789abcdef0123456789abcdef01234567
+```
+
+Replace the example SHA with the intended private-repository commit. Candidate
+overrides are evidence-producing tests only; advance the CodingWorkspace
+`release` branch and let `track-cw.yml` update `CW_REF` for an accepted release.
 
 On a Docker host that permits unprivileged user, mount, and PID namespaces, run:
 

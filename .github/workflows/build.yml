@@ -27,6 +27,11 @@ on:
         required: true
         type: boolean
         default: false
+      codingworkspace_candidate_sha:
+        description: Optional full lowercase CW SHA for a non-promoting candidate build
+        required: false
+        type: string
+        default: ""
 
 # Fork pull requests run only non-secret selection/validation. AWS OIDC is
 # never requested for a pull request. Ordinary images retain their existing
@@ -181,6 +186,30 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate optional CodingWorkspace candidate request
+        if: matrix.image == 'codingworkspace-notebook'
+        env:
+          REQUESTED_CW_CANDIDATE_SHA: ${{ inputs.codingworkspace_candidate_sha || '' }}
+          PROMOTE_CODINGWORKSPACE: ${{ inputs.promote_codingworkspace || false }}
+        run: |
+          set -euo pipefail
+          tracked_ref=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/CW_REF)
+          build_ref=$(python3 codingworkspace-notebook/ci/select_cw_build_ref.py \
+            --tracked-ref "$tracked_ref" \
+            --candidate-sha "$REQUESTED_CW_CANDIDATE_SHA" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --promote-codingworkspace "$PROMOTE_CODINGWORKSPACE")
+          candidate_override=false
+          candidate_sha=""
+          if [ -n "$REQUESTED_CW_CANDIDATE_SHA" ]; then
+            candidate_override=true
+            candidate_sha="$build_ref"
+          fi
+          printf 'CW_TRACKED_REF=%s\n' "$tracked_ref" >> "$GITHUB_ENV"
+          printf 'CW_REF=%s\n' "$build_ref" >> "$GITHUB_ENV"
+          printf 'CW_CANDIDATE_OVERRIDE=%s\n' "$candidate_override" >> "$GITHUB_ENV"
+          printf 'CW_CANDIDATE_SHA=%s\n' "$candidate_sha" >> "$GITHUB_ENV"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -199,7 +228,8 @@ jobs:
           CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          CW_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/CW_REF)
+          test -n "${CW_REF:-}"
+          test -n "${CW_TRACKED_REF:-}"
           GIZMOAPP_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/GIZMOAPP_REF)
           if [ -z "${CW_DEPLOY_KEY:-}" ]; then
             echo "CW_DEPLOY_KEY is required for a trusted codingworkspace-notebook build." >&2
@@ -224,6 +254,10 @@ jobs:
           install -d -m 0700 "$sourcecontexts"
           GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
             git clone --quiet --no-tags git@github.com:kevinlb1/CodingWorkspace.git "$cwsrc"
+          test "$(git -C "$cwsrc" rev-parse --show-object-format)" = sha1
+          git -C "$cwsrc" cat-file -e "${CW_REF}^{commit}"
+          resolved_cw_ref=$(git -C "$cwsrc" rev-parse --verify "${CW_REF}^{commit}")
+          test "$resolved_cw_ref" = "$CW_REF"
           git -C "$cwsrc" checkout --quiet --detach "$CW_REF"
           test "$(git -C "$cwsrc" rev-parse HEAD)" = "$CW_REF"
 
@@ -261,7 +295,14 @@ jobs:
           if [ "$IMAGE_NAME" = codingworkspace-notebook ]; then
             test -n "${CW_REF:-}"
             test -n "${GIZMOAPP_REF:-}"
-            tag="${GITHUB_SHA::7}-cw${CW_REF:0:7}-gz${GIZMOAPP_REF:0:7}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+            if [ "${CW_CANDIDATE_OVERRIDE:-false}" = true ]; then
+              test "${CW_CANDIDATE_SHA:-}" = "$CW_REF"
+              tag="${GITHUB_SHA::7}-cw${CW_CANDIDATE_SHA}-gz${GIZMOAPP_REF:0:7}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+            else
+              test -z "${CW_CANDIDATE_SHA:-}"
+              test "$CW_REF" = "${CW_TRACKED_REF:-}"
+              tag="${GITHUB_SHA::7}-cw${CW_REF:0:7}-gz${GIZMOAPP_REF:0:7}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+            fi
           fi
           registry="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           ecr_image="${registry}/${IMAGE_NAME}:${tag}"
@@ -295,6 +336,7 @@ jobs:
               --build-context "cwsrc=$CW_CONTEXT"
               --build-context "gizmosrc=$GIZMO_CONTEXT"
               --build-arg "CW_REF=$CW_REF"
+              --build-arg "CW_CANDIDATE_SHA=${CW_CANDIDATE_SHA:-}"
               --build-arg "GIZMOAPP_REF=$GIZMOAPP_REF"
               --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION"
             )
@@ -391,6 +433,9 @@ jobs:
             printf 'image=%s\n' "${ECR_IMAGE:-not-published}"
             printf 'digest=%s\n' "${IMAGE_DIGEST:-not-published}"
             printf 'codingworkspace_commit=%s\n' "${CW_REF:-not-applicable}"
+            printf 'codingworkspace_tracked_commit=%s\n' "${CW_TRACKED_REF:-not-applicable}"
+            printf 'codingworkspace_candidate_commit=%s\n' "${CW_CANDIDATE_SHA:-not-requested}"
+            printf 'codingworkspace_candidate_override=%s\n' "${CW_CANDIDATE_OVERRIDE:-false}"
             printf 'gizmoapp_commit=%s\n' "${GIZMOAPP_REF:-not-applicable}"
             printf 'prepromotion_job_status=%s\n' "${{ job.status }}"
             printf 'immutable_publish_result=%s\n' "${{ steps.publish_candidate.outcome }}"
@@ -432,7 +477,9 @@ jobs:
         if: >-
           matrix.image == 'codingworkspace-notebook' &&
           github.event_name == 'workflow_dispatch' &&
-          inputs.promote_codingworkspace == true
+          inputs.promote_codingworkspace == true &&
+          inputs.codingworkspace_candidate_sha == '' &&
+          env.CW_CANDIDATE_OVERRIDE != 'true'
         run: |
           set -euo pipefail
           digest_for_tag() {

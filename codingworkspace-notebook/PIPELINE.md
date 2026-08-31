@@ -17,6 +17,10 @@ reviewed jupyter-images main push touching CodingWorkspace
                                                   └─ image smoke + SBOM/vulnerability scan
                                                      (CodingWorkspace preview/latest stay put)
 
+reviewed jupyter-images main workflow_dispatch with an optional exact CW SHA
+  └─ validate full lowercase commit in private clone → build/push/scan candidate
+       (CW_REF is unchanged; promotion is categorically refused)
+
 ordinary-image branch/tag push
   └─ existing short-SHA build/push → move that image's latest
      (no CodingWorkspace lint, source key, SBOM, or Trivy policy)
@@ -72,7 +76,9 @@ CodingWorkspace `release` is the action that makes the tracker update `CW_REF`
 and request a promotion build. Do not pin unreleased application code in an
 image PR or manually dispatch promotion merely to test one: the pin has not
 passed the application release gate, and the next tracker run will reconcile
-it back to the actual `release` head.
+it back to the actual `release` head. Instead, use the exact-SHA candidate
+dispatch described below. It tests a committed CodingWorkspace revision without
+changing `CW_REF`, and it has no authority to move `preview` or `latest`.
 
 ## Workflow policy
 
@@ -105,6 +111,14 @@ it back to the actual `release` head.
    the pulled digest. A rejected immutable candidate may remain in ECR for
    diagnosis, but it is never promoted.
 
+The hardened job also accepts an optional `codingworkspace_candidate_sha` only
+on a trusted `workflow_dispatch` of reviewed `main`. The value must be exactly
+40 lowercase hexadecimal characters and must resolve to that exact commit in
+the credentialed private clone. The workflow retains the tracker-owned
+`CW_REF`, marks the build as an override, and fails before publication if the
+same request asks for `promote_codingworkspace=true`. The promotion step has a
+second independent condition that excludes every nonempty candidate input.
+
 For `codingworkspace-notebook`, both `latest` and `preview` require reviewed
 `main`, all image gates, and a trusted `workflow_dispatch` with `publish=true`
 and `promote_codingworkspace=true`. The OpenCode updater first waits for an
@@ -133,7 +147,7 @@ condition in branch YAML.
 | Input | Resolution and verification |
 | --- | --- |
 | jupyter-images | The checked-out full `GITHUB_SHA` on reviewed `main` |
-| CodingWorkspace | Tracker-owned lowercase 40-character SHA in `CW_REF`; on `jupyter-images` main it must equal the CodingWorkspace `release` head; private clone with `CW_DEPLOY_KEY`; detached checkout must equal that SHA |
+| CodingWorkspace | Normally the tracker-owned lowercase 40-character SHA in `CW_REF`, which on `jupyter-images` main equals the CodingWorkspace `release` head. An explicit main-only manual candidate may instead select a different full lowercase SHA without editing `CW_REF`; it is non-promoting. In both cases the private clone uses `CW_DEPLOY_KEY`, the selected object must be that exact SHA-1 commit, and detached checkout must equal it. |
 | GizmoApp | Exactly one lowercase 40-character SHA in `GIZMOAPP_REF`; credential-free public clone; detached checkout must equal that SHA and use SHA-1 object format |
 | Base image | Version tag plus `sha256` digest in `Dockerfile` |
 | OpenCode and other runtime tools | Fixed versions/checksums in reviewed image pin files |
@@ -148,11 +162,15 @@ back to `accept-new` or a live unverified `ssh-keyscan`.
 Candidate tags are run-unique because this ECR repository must also support the
 moving `preview`/`latest` tags and is therefore tag-mutable. CodingWorkspace uses
 `<ji7>-cw<cw7>-gz<gizmo7>-r<run-id>-a<attempt>`; other images use
-`<ji7>-r<run-id>-a<attempt>`. A rerun cannot overwrite an earlier candidate.
+`<ji7>-r<run-id>-a<attempt>`. An exact-SHA override uses
+`<ji7>-cw<cw40>-gz<gizmo7>-r<run-id>-a<attempt>`, preserving the full requested
+commit in its tag. A rerun cannot overwrite an earlier candidate.
 Tags are still pointers, not sufficient release evidence. The full GizmoApp and
 CodingWorkspace commits, jupyter-images commit, tested ECR digest, scanner
 versions, and workflow run are stored in the 90-day workflow artifact and image
-labels. Ninety days is only a transfer window. Production promotion requires
+labels. The artifact separately records the tracker pin, effective source,
+candidate SHA, and candidate-override flag. Ninety days is only a transfer
+window. Production promotion requires
 verifying `SHA256SUMS` and copying the complete bundle—including the exact
 `published-image.txt` digest—into the course's independently backed-up,
 indefinite release record. Record that destination in the production change.
@@ -357,6 +375,24 @@ gh workflow run build.yml --repo ubc/jupyter-images --ref main \
   -f promote_codingworkspace=false
 ```
 
+To test one committed CodingWorkspace revision before advancing its `release`
+branch, add its exact full lowercase SHA. This must still dispatch the reviewed
+`jupyter-images` `main` workflow and select only the CodingWorkspace image:
+
+```bash
+gh workflow run build.yml --repo ubc/jupyter-images --ref main \
+  -f publish=true \
+  -f scope=codingworkspace-notebook \
+  -f promote_codingworkspace=false \
+  -f codingworkspace_candidate_sha=0123456789abcdef0123456789abcdef01234567
+```
+
+Replace the example with the intended commit. The run fails if the SHA is
+malformed, absent from the private clone, not itself a commit, or combined with
+promotion. It does not edit `CW_REF`; review the immutable digest and evidence,
+then advance CodingWorkspace `release` through the normal tracker path if the
+candidate is accepted.
+
 Manual promotion is intentionally possible only as an explicit trusted
 dispatch of `main`; normally use the tracker so `CW_REF` is first reconciled to
 the release branch. Before any manual `promote_codingworkspace=true`, verify the
@@ -425,6 +461,7 @@ runbook.
 | Fork PR asks for AWS or fails because a secret is absent | Workflow regression: PR validation must not enter the trusted publish job |
 | Static validation rejects an Action | Resolve the desired upstream release and review/pin its full commit; do not switch to a floating tag |
 | Tracker cannot clone CodingWorkspace | Check the read-only deploy key, the pinned GitHub host key, and repository access; never weaken strict host checking |
+| Exact-SHA candidate is rejected before build | Supply one lowercase 40-character commit available in the private clone, dispatch reviewed `main`, and keep `promote_codingworkspace=false`; never change `CW_REF` merely to test it |
 | Tracker push loses a race | No force/rebase is used; the next scheduled run retries from fresh `main` |
 | OpenCode update PR is not merged | Inspect its dispatched validation and branch-protection requirements; the next schedule revalidates and retries the exact open PR head |
 | No eligible OpenCode update is proposed | Expected while newer stable releases are inside the 48-hour soak, lack both required published digests/assets, or are not newer than the pin |

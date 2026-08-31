@@ -19,6 +19,7 @@ LOCAL_PUBLISH = (ROOT / "codingworkspace-notebook/build-and-push.sh").read_text(
 LOCAL_SCAN = (ROOT / "codingworkspace-notebook/ci/scan-local-image.sh").read_text(
     encoding="utf-8"
 )
+DOCKERFILE = (ROOT / "codingworkspace-notebook/Dockerfile").read_text(encoding="utf-8")
 
 EXPECTED_ACTIONS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -66,6 +67,12 @@ selection_job = job(BUILD, "select-images")
 validation_job = job(BUILD, "validate-codingworkspace")
 ordinary_job = job(BUILD, "build-and-push-ordinary")
 publish_job_text = job(BUILD, "build-scan-publish")
+candidate_request = step(BUILD, "Validate optional CodingWorkspace candidate request")
+source_resolution = step(BUILD, "Resolve exact CodingWorkspace and GizmoApp sources")
+candidate_tag = step(BUILD, "Prepare immutable image name")
+candidate_build = step(
+    BUILD, "Build and publish immutable candidate with provenance and BuildKit SBOM"
+)
 
 for required in (
     "github.event.pull_request.base.sha",
@@ -102,6 +109,7 @@ for forbidden in (
     "validate-codingworkspace",
     "codingworkspace-publication",
     "CW_DEPLOY_KEY",
+    "codingworkspace_candidate_sha",
     "trivy-action",
     "sbom-action",
 ):
@@ -135,11 +143,74 @@ for required in (
     if required not in publish_job_text:
         raise SystemExit(f"hardened publication is not CW-only: missing {required}")
 
+# The optional exact-source candidate is an explicit, manual-only exception to
+# the tracker-owned CW_REF. It must never change the pin or share promotion
+# authority, and it must retain all of the main/environment publication gates.
+candidate_input = re.search(
+    r'(?ms)^      codingworkspace_candidate_sha:\n(.*?)(?=^\s{6}[a-zA-Z0-9_-]+:\n|^\S)',
+    BUILD,
+)
+if not candidate_input or any(
+    required not in candidate_input.group(1)
+    for required in ('required: false', 'type: string', 'default: ""')
+):
+    raise SystemExit("the optional CodingWorkspace candidate input is missing or unsafe")
+for required in (
+    "if: matrix.image == 'codingworkspace-notebook'",
+    "inputs.codingworkspace_candidate_sha",
+    "select_cw_build_ref.py",
+    '--tracked-ref "$tracked_ref"',
+    '--candidate-sha "$REQUESTED_CW_CANDIDATE_SHA"',
+    '--event-name "$GITHUB_EVENT_NAME"',
+    '--promote-codingworkspace "$PROMOTE_CODINGWORKSPACE"',
+    "CW_TRACKED_REF",
+    "CW_CANDIDATE_OVERRIDE",
+    "CW_CANDIDATE_SHA",
+):
+    if required not in candidate_request:
+        raise SystemExit(f"candidate request validation is missing {required}")
+for required in (
+    'git clone --quiet --no-tags git@github.com:kevinlb1/CodingWorkspace.git',
+    'rev-parse --show-object-format)" = sha1',
+    'cat-file -e "${CW_REF}^{commit}"',
+    'rev-parse --verify "${CW_REF}^{commit}"',
+    'test "$resolved_cw_ref" = "$CW_REF"',
+    'checkout --quiet --detach "$CW_REF"',
+):
+    if required not in source_resolution:
+        raise SystemExit(f"candidate commit is not exactly verified in the private clone: {required}")
+for forbidden in ("update_pin.py", "git add", "git commit", "git push"):
+    if forbidden in publish_job_text:
+        raise SystemExit(f"the build job may not modify tracker-owned CW_REF: {forbidden}")
+for required in (
+    'if [ "${CW_CANDIDATE_OVERRIDE:-false}" = true ]',
+    'test "${CW_CANDIDATE_SHA:-}" = "$CW_REF"',
+    '-cw${CW_CANDIDATE_SHA}-gz${GIZMOAPP_REF:0:7}',
+    '-cw${CW_REF:0:7}-gz${GIZMOAPP_REF:0:7}',
+):
+    if required not in candidate_tag:
+        raise SystemExit(f"candidate tag policy is missing {required}")
+if '--build-arg "CW_CANDIDATE_SHA=${CW_CANDIDATE_SHA:-}"' not in candidate_build:
+    raise SystemExit("the verified candidate SHA is not passed into the image contract")
+for required in (
+    "ARG CW_CANDIDATE_SHA",
+    'build_ref="${tracked_ref}"',
+    'if [ -n "${CW_CANDIDATE_SHA}" ]',
+    "grep -Eq '^[0-9a-f]{40}$'",
+    'build_ref="${CW_CANDIDATE_SHA}"',
+    'test "${CW_REF}" = "${build_ref}"',
+    'git bundle list-heads /cwsrc/source.bundle)" = "${build_ref} HEAD"',
+):
+    if required not in DOCKERFILE:
+        raise SystemExit(f"Docker candidate source contract is missing {required}")
+
 promotion = step(BUILD, "Promote approved CodingWorkspace release")
 for required in (
     "matrix.image == 'codingworkspace-notebook'",
     "github.event_name == 'workflow_dispatch'",
     "inputs.promote_codingworkspace == true",
+    "inputs.codingworkspace_candidate_sha == ''",
+    "env.CW_CANDIDATE_OVERRIDE != 'true'",
     "move_and_verify latest",
     "move_and_verify preview",
     "previous_latest",
@@ -253,6 +324,9 @@ for required in (
     "sbom_result",
     "vulnerability_scan_result",
     "vulnerability_gate_result",
+    "codingworkspace_tracked_commit",
+    "codingworkspace_candidate_commit",
+    "codingworkspace_candidate_override",
     "codingworkspace_promotion_requested",
     "published-image.txt",
     "SHA256SUMS",
