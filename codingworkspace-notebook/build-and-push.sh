@@ -4,9 +4,9 @@
 # This is the manual alternative to the repo's build.yml Action, used while the
 # CodingWorkspace source repo is private and no CI credential is configured.
 #
-# CodingWorkspace and GizmoApp are installed from LOCAL checkouts (passed to
-# buildx as named contexts), so no GitHub credential is needed and the build
-# uses exactly what is on disk.
+# CodingWorkspace and GizmoApp are installed from LOCAL checkouts converted to
+# bundle-only Buildx contexts, so no GitHub credential is needed and the build
+# uses exactly the reviewed Git commits on disk.
 #
 # Requirements on the machine you run this from:
 #   - Docker with buildx (standard in modern Docker Desktop / docker-ce)
@@ -117,6 +117,19 @@ if [ -n "$(git -C "${GIZMO_SRC}" status --porcelain --untracked-files=all)" ]; t
   exit 1
 fi
 
+# Use builder-independent, bundle-only named contexts. BuildKit may omit .git
+# from local directory contexts, while the bundle preserves the exact reviewed
+# commit object and history without transferring checkout credentials/config.
+SOURCE_CONTEXT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/codingworkspace-source-context.XXXXXX")"
+cleanup_source_contexts() {
+  rm -rf -- "$SOURCE_CONTEXT_ROOT"
+}
+trap cleanup_source_contexts EXIT
+CW_CONTEXT="${SOURCE_CONTEXT_ROOT}/cw"
+GIZMO_CONTEXT="${SOURCE_CONTEXT_ROOT}/gizmo"
+python3 "${SCRIPT_DIR}/ci/prepare_git_context.py" "$CW_SRC" "$cw_ref" "$CW_CONTEXT"
+python3 "${SCRIPT_DIR}/ci/prepare_git_context.py" "$GIZMO_SRC" "$gizmo_ref" "$GIZMO_CONTEXT"
+
 # Image tag: default to <jupyter-images sha>-cw<cw sha>-gz<gizmo sha>.
 if [ -z "${IMAGE_TAG:-}" ]; then
   ji_sha="$(git -C "${SCRIPT_DIR}" rev-parse --short=7 HEAD 2>/dev/null || echo nogit)"
@@ -134,8 +147,8 @@ echo ">> CodingWorkspace source: ${CW_SRC}"
 echo ">> GizmoApp source: ${GIZMO_SRC}"
 docker buildx build \
   --platform "${PLATFORM}" \
-  --build-context "cwsrc=${CW_SRC}" \
-  --build-context "gizmosrc=${GIZMO_SRC}" \
+  --build-context "cwsrc=${CW_CONTEXT}" \
+  --build-context "gizmosrc=${GIZMO_CONTEXT}" \
   --build-arg "CW_REF=${cw_ref}" \
   --build-arg "GIZMOAPP_REF=${gizmo_ref}" \
   --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \

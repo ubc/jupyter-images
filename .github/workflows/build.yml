@@ -210,6 +210,8 @@ jobs:
           known_hosts="$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts"
           cwsrc="$RUNNER_TEMP/cw-src"
           gizmosrc="$RUNNER_TEMP/gizmo-src"
+          cwcontext="$RUNNER_TEMP/cw-context"
+          gizmocontext="$RUNNER_TEMP/gizmo-context"
           cleanup() {
             rm -f "$keyfile"
           }
@@ -217,7 +219,7 @@ jobs:
           umask 077
           printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
 
-          rm -rf "$cwsrc" "$gizmosrc"
+          rm -rf "$cwsrc" "$gizmosrc" "$cwcontext" "$gizmocontext"
           GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
             git clone --quiet --no-tags git@github.com:kevinlb1/CodingWorkspace.git "$cwsrc"
           git -C "$cwsrc" checkout --quiet --detach "$CW_REF"
@@ -228,12 +230,21 @@ jobs:
           test "$(git -C "$gizmosrc" rev-parse HEAD)" = "$GIZMOAPP_REF"
           test "$(git -C "$gizmosrc" rev-parse --show-object-format)" = sha1
 
+          # The docker-container Buildx driver does not reliably transfer a
+          # local checkout's .git directory. Pass bundle-only contexts instead:
+          # the image can still verify and archive the exact Git objects, while
+          # checkout credentials and configuration never reach the builder.
+          python3 codingworkspace-notebook/ci/prepare_git_context.py \
+            "$cwsrc" "$CW_REF" "$cwcontext"
+          python3 codingworkspace-notebook/ci/prepare_git_context.py \
+            "$gizmosrc" "$GIZMOAPP_REF" "$gizmocontext"
+
           printf 'CW_REF=%s\n' "$CW_REF" >> "$GITHUB_ENV"
           printf 'GIZMOAPP_REF=%s\n' "$GIZMOAPP_REF" >> "$GITHUB_ENV"
           . codingworkspace-notebook/RUNTIME_PINS.env
           printf 'OPENCODE_VERSION=%s\n' "$OPENCODE_VERSION" >> "$GITHUB_ENV"
-          printf 'CW_CONTEXT=%s\n' "$cwsrc" >> "$GITHUB_ENV"
-          printf 'GIZMO_CONTEXT=%s\n' "$gizmosrc" >> "$GITHUB_ENV"
+          printf 'CW_CONTEXT=%s\n' "$cwcontext" >> "$GITHUB_ENV"
+          printf 'GIZMO_CONTEXT=%s\n' "$gizmocontext" >> "$GITHUB_ENV"
 
       - name: Prepare immutable image name
         run: |

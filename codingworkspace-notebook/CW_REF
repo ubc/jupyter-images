@@ -1,6 +1,6 @@
 # CodingWorkspace source ref for the CI image build (.github/workflows/build.yml).
 # The workflow checks out kevinlb1/CodingWorkspace at this ref (read-only
-# CW_DEPLOY_KEY deploy key) and passes it to the build as the `cwsrc` context.
+# CW_DEPLOY_KEY deploy key) and converts it to a bundle-only `cwsrc` context.
 #
 # OWNED BY AUTOMATION: track-cw.yml follows the CodingWorkspace `release`
 # branch. On jupyter-images main this pin must equal that branch's exact head;

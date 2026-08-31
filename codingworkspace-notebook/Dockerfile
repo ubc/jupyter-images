@@ -70,20 +70,23 @@ RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
     test "${#expected_ref}" -eq 40; \
     printf '%s' "${expected_ref}" | grep -Eq '^[0-9a-f]{40}$'; \
     test "${CW_REF}" = "${expected_ref}"; \
-    test "$(git -c safe.directory=/cwsrc -C /cwsrc rev-parse HEAD)" = "${expected_ref}"; \
+    test "$(git bundle list-heads /cwsrc/source.bundle)" = "${expected_ref} HEAD"; \
+    git clone --quiet --no-local /cwsrc/source.bundle /tmp/cwrepo; \
+    test "$(git -C /tmp/cwrepo rev-parse HEAD)" = "${expected_ref}"; \
+    test "$(git -C /tmp/cwrepo rev-parse --is-shallow-repository)" = "false"; \
     mkdir -p /tmp/cwbuild; \
-    git -c safe.directory=/cwsrc -C /cwsrc archive --format=tar "${expected_ref}" \
+    git -C /tmp/cwrepo archive --format=tar "${expected_ref}" \
         | tar -C /tmp/cwbuild -xf -; \
     pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes \
         --requirement /tmp/proxy-requirements.txt; \
     pip install --no-cache-dir --no-deps --no-build-isolation /tmp/cwbuild; \
     pip check; \
     python -c 'import importlib.metadata as m; assert m.version("jupyterhub") == "5.5.0"; assert m.version("jupyter-server-proxy") == "4.5.0"; assert m.version("aiohttp") == "3.14.3"; assert m.version("simpervisor") == "1.0.0"; assert m.version("notebook") == "7.6.1"; assert m.version("jupyterlab") == "4.6.2"'; \
-    rm -rf /tmp/cwbuild; \
+    rm -rf /tmp/cwbuild /tmp/cwrepo; \
     rm -f /tmp/proxy-requirements.txt
 
-# Sanitize a full-history exact starter context through upload-pack. This
-# prevents CI checkout credentials/config from entering an image layer.
+# Reconstruct the full-history exact starter from its bundle-only context. The
+# bundle contains Git objects, not CI checkout credentials or configuration.
 USER root
 COPY codingworkspace-notebook/GIZMOAPP_REF /tmp/GIZMOAPP_REF
 RUN --mount=type=bind,from=gizmosrc,target=/gizmosrc \
@@ -92,16 +95,13 @@ RUN --mount=type=bind,from=gizmosrc,target=/gizmosrc \
     test "${#expected_ref}" -eq 40; \
     printf '%s' "${expected_ref}" | grep -Eq '^[0-9a-f]{40}$'; \
     test "${GIZMOAPP_REF}" = "${expected_ref}"; \
-    test "$(git -c safe.directory=/gizmosrc -C /gizmosrc rev-parse HEAD)" = "${expected_ref}"; \
-    test "$(git -c safe.directory=/gizmosrc -C /gizmosrc rev-parse --is-shallow-repository)" = "false"; \
-    git -c safe.directory=/gizmosrc -C /gizmosrc diff --quiet; \
-    git -c safe.directory=/gizmosrc -C /gizmosrc diff --cached --quiet; \
-    test -z "$(git -c safe.directory=/gizmosrc -C /gizmosrc status --porcelain --untracked-files=normal)"; \
+    test "$(git bundle list-heads /gizmosrc/source.bundle)" = "${expected_ref} HEAD"; \
     install -d --owner=root --group=root --mode=0555 /opt/codingworkspace-starters; \
-    git -c safe.directory=/gizmosrc clone --no-local --no-hardlinks \
-        --upload-pack='git -c safe.directory=/gizmosrc upload-pack' \
-        /gizmosrc /opt/codingworkspace-starters/GizmoApp; \
+    git clone --quiet --no-local --no-hardlinks /gizmosrc/source.bundle \
+        /opt/codingworkspace-starters/GizmoApp; \
     test "$(git -C /opt/codingworkspace-starters/GizmoApp rev-parse HEAD)" = "${expected_ref}"; \
+    test "$(git -C /opt/codingworkspace-starters/GizmoApp rev-parse --is-shallow-repository)" = "false"; \
+    test -z "$(git -C /opt/codingworkspace-starters/GizmoApp status --porcelain --untracked-files=normal)"; \
     git -C /opt/codingworkspace-starters/GizmoApp remote remove origin; \
     chown -R root:root /opt/codingworkspace-starters/GizmoApp; \
     find /opt/codingworkspace-starters/GizmoApp -type d -exec chmod 0555 '{}' +; \

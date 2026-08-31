@@ -125,8 +125,8 @@ The trusted build resolves three reviewed inputs:
 | Input | Pin / source |
 | --- | --- |
 | Notebook base | Digest-pinned `quay.io/jupyter/base-notebook:hub-5.5.0` in `Dockerfile` |
-| CodingWorkspace | Tracker-owned full SHA in `CW_REF`, equal to the CodingWorkspace `release` head on `jupyter-images` main; private source is cloned with the read-only deploy key and passed as the `cwsrc` build context |
-| GizmoApp starter | Full SHA in `GIZMOAPP_REF`; public source is cloned and passed as the `gizmosrc` build context |
+| CodingWorkspace | Tracker-owned full SHA in `CW_REF`, equal to the CodingWorkspace `release` head on `jupyter-images` main; private source is cloned with the read-only deploy key and converted to a bundle-only `cwsrc` build context |
+| GizmoApp starter | Full SHA in `GIZMOAPP_REF`; public source is cloned and converted to a bundle-only `gizmosrc` build context |
 
 The GizmoApp checkout is baked at
 `/opt/codingworkspace-starters/GizmoApp`, remains a SHA-1 Git repository, and is
@@ -134,7 +134,10 @@ root-owned and non-writable. New projects clone from that local source without
 requiring a network or student Git credential. Network imports are limited to
 credential-free HTTPS repositories on `github.students.cs.ubc.ca`.
 
-The build verifies the exact source SHAs after checkout. Image labels and the
+The build verifies the exact source SHAs after checkout, creates self-contained
+Git bundles that advertise only those detached commits, and re-verifies the
+bundle commits inside the image build. This works across Buildx drivers without
+transferring checkout credentials or Git configuration. Image labels and the
 workflow's release-evidence artifact record the full CodingWorkspace and
 GizmoApp commits. Dependency versions and checksums are fixed in the Dockerfile
 and its pin files. The complete Python 3.13 proxy runtime is installed only from

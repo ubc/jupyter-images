@@ -83,6 +83,7 @@ for path in sorted(Path("codingworkspace-notebook").glob("*.py")) + sorted(
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
 PY
 python3 codingworkspace-notebook/ci/validate_ci_policy.py
+python3 codingworkspace-notebook/ci/test_prepare_git_context.py -v
 python3 codingworkspace-notebook/ci/test_update_opencode_release.py -v
 
 expected_host_fingerprint='SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
@@ -121,6 +122,10 @@ reject_ere_matches \
   'CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS' "$dockerfile"
 grep -Eq 'bubblewrap' "$dockerfile" || fail "Bubblewrap is not installed"
 grep -Eq 'from=gizmosrc' "$dockerfile" || fail "the pinned GizmoApp build context is not used"
+grep -Eq 'git bundle list-heads /cwsrc/source\.bundle' "$dockerfile" \
+  || fail "CodingWorkspace is not verified from its bundle-only build context"
+grep -Eq 'git bundle list-heads /gizmosrc/source\.bundle' "$dockerfile" \
+  || fail "GizmoApp is not verified from its bundle-only build context"
 grep -Eq '/usr/local/sbin/codingworkspace-prestop' "$dockerfile" \
   || fail "the image-side preStop helper is not installed"
 grep -Eq 'git .* archive --format=tar' "$dockerfile" \
