@@ -4,23 +4,25 @@
 # This is the manual alternative to the repo's build.yml Action, used while the
 # CodingWorkspace source repo is private and no CI credential is configured.
 #
-# CodingWorkspace is installed from a LOCAL checkout (passed to buildx as the
-# `cwsrc` build context), so NO GitHub credential is needed and you build exactly
-# what is on disk (no need to push the branch first).
+# CodingWorkspace and GizmoApp are installed from LOCAL checkouts (passed to
+# buildx as named contexts), so no GitHub credential is needed and the build
+# uses exactly what is on disk.
 #
 # Requirements on the machine you run this from:
 #   - Docker with buildx (standard in modern Docker Desktop / docker-ce)
 #   - AWS CLI configured with credentials that can push to ECR
-#   - A local checkout of kevinlb1/CodingWorkspace (see CW_SRC below)
+#   - Local checkouts of kevinlb1/CodingWorkspace and kevinlb1/GizmoApp
 #
 # Usage:
 #   ECR_ACCOUNT=123456789012 AWS_REGION=ca-central-1 ./build-and-push.sh
 #
 # Optional overrides:
-#   IMAGE_TAG=<tag>          # default: <jupyter-images sha>-cw<codingworkspace sha>[.dirty]
+#   IMAGE_TAG=<tag>          # default: <ji sha>-cw<cw sha>-gz<gizmo sha>
 #   CW_SRC=/path/to/CodingWorkspace   # default: ../CodingWorkspace next to this repo
+#   GIZMO_SRC=/path/to/GizmoApp       # default: ../GizmoApp next to this repo
 #   PLATFORM=linux/amd64     # target arch; MUST match your EKS nodes
 #   AWS_PROFILE=shared       # AWS CLI profile to use (default: shared)
+#   SECURITY_REPORT_DIR=/path/to/evidence
 set -euo pipefail
 
 : "${ECR_ACCOUNT:?set ECR_ACCOUNT to your AWS account id}"
@@ -42,23 +44,116 @@ if [ ! -f "${CW_SRC}/pyproject.toml" ]; then
 fi
 CW_SRC="$(cd "${CW_SRC}" && pwd)"
 
-# Image tag: default to <jupyter-images sha>-cw<codingworkspace sha>[.dirty] so each
-# build is uniquely identified by the exact state of BOTH inputs (the image config in
-# this repo AND the app source in CW_SRC). Override IMAGE_TAG to pin a release.
+# The canonical starter is a separate, pinned source input rather than a
+# network clone performed inside Docker. Both local source contexts must be
+# clean exact commits matching their reviewed pin files.
+GIZMO_SRC="${GIZMO_SRC:-${ROOT_DIR}/../GizmoApp}"
+if [ ! -d "${GIZMO_SRC}/.git" ]; then
+  echo "GizmoApp source not found at: ${GIZMO_SRC}" >&2
+  echo "Set GIZMO_SRC=/path/to/GizmoApp (a Git checkout)." >&2
+  exit 1
+fi
+GIZMO_SRC="$(cd "${GIZMO_SRC}" && pwd)"
+
+cw_ref="$(git -C "${CW_SRC}" rev-parse HEAD)"
+gizmo_ref="$(git -C "${GIZMO_SRC}" rev-parse HEAD)"
+case "$cw_ref" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+  *) echo "CodingWorkspace checkout has no valid Git commit." >&2; exit 1 ;;
+esac
+case "$gizmo_ref" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+  *) echo "GizmoApp checkout has no valid Git commit." >&2; exit 1 ;;
+esac
+if [ "${#cw_ref}" -ne 40 ] || [ "${#gizmo_ref}" -ne 40 ]; then
+  echo "Both source checkouts must use full 40-character SHA-1 commits." >&2
+  exit 1
+fi
+if [ "$(git -C "${GIZMO_SRC}" rev-parse --show-object-format)" != sha1 ]; then
+  echo "GizmoApp must use the supported SHA-1 Git object format." >&2
+  exit 1
+fi
+
+# A published image must be reconstructible from the commits embedded in its
+# tag and labels. Refuse staged or unstaged tracked changes in every input;
+# source-context checks below retain the existing stricter untracked-file rule.
+tracked_dirty=0
+check_tracked_clean() {
+  local name=$1
+  local path=$2
+  if ! git -C "$path" diff --quiet HEAD --; then
+    echo "$name contains tracked changes and cannot be published." >&2
+    tracked_dirty=1
+  fi
+}
+check_tracked_clean jupyter-images "$ROOT_DIR"
+check_tracked_clean CodingWorkspace "$CW_SRC"
+check_tracked_clean GizmoApp "$GIZMO_SRC"
+if [ "$tracked_dirty" -ne 0 ]; then
+  echo "Commit or revert tracked changes before running build-and-push.sh." >&2
+  exit 1
+fi
+pinned_cw_ref="$(python3 "${SCRIPT_DIR}/ci/read_pin.py" "${SCRIPT_DIR}/CW_REF")"
+pinned_gizmo_ref="$(python3 "${SCRIPT_DIR}/ci/read_pin.py" "${SCRIPT_DIR}/GIZMOAPP_REF")"
+. "${SCRIPT_DIR}/RUNTIME_PINS.env"
+if [ "$cw_ref" != "$pinned_cw_ref" ]; then
+  echo "CodingWorkspace HEAD ($cw_ref) does not match CW_REF ($pinned_cw_ref)." >&2
+  echo "Use the pinned checkout, or deliberately update CW_REF before a test build." >&2
+  exit 1
+fi
+if [ "$gizmo_ref" != "$pinned_gizmo_ref" ]; then
+  echo "GizmoApp HEAD ($gizmo_ref) does not match GIZMOAPP_REF ($pinned_gizmo_ref)." >&2
+  echo "Use the pinned checkout, or deliberately update GIZMOAPP_REF before a test build." >&2
+  exit 1
+fi
+if [ -n "$(git -C "${CW_SRC}" status --porcelain --untracked-files=all)" ]; then
+  echo "CodingWorkspace source contains tracked, staged, or untracked changes." >&2
+  echo "Commit the exact source and update CW_REF before building." >&2
+  exit 1
+fi
+if [ -n "$(git -C "${GIZMO_SRC}" status --porcelain --untracked-files=all)" ]; then
+  echo "GizmoApp source contains tracked, staged, or untracked changes." >&2
+  echo "Commit the exact source and update GIZMOAPP_REF before building." >&2
+  exit 1
+fi
+
+# Image tag: default to <jupyter-images sha>-cw<cw sha>-gz<gizmo sha>.
 if [ -z "${IMAGE_TAG:-}" ]; then
   ji_sha="$(git -C "${SCRIPT_DIR}" rev-parse --short=7 HEAD 2>/dev/null || echo nogit)"
-  cw_sha="$(git -C "${CW_SRC}" rev-parse --short=7 HEAD 2>/dev/null || echo nogit)"
-  # Dirty only for modified TRACKED files (ignore untracked cruft like .DS_Store).
-  dirty=""
-  if ! git -C "${SCRIPT_DIR}" diff --quiet HEAD 2>/dev/null \
-     || ! git -C "${CW_SRC}" diff --quiet HEAD 2>/dev/null; then
-    dirty=".dirty"
-  fi
-  IMAGE_TAG="${ji_sha}-cw${cw_sha}${dirty}"
+  cw_sha="${cw_ref:0:7}"
+  gizmo_sha="${gizmo_ref:0:7}"
+  IMAGE_TAG="${ji_sha}-cw${cw_sha}-gz${gizmo_sha}"
 fi
 
 REGISTRY="${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+SECURITY_REPORT_DIR="${SECURITY_REPORT_DIR:-${TMPDIR:-/tmp}/codingworkspace-image-evidence/${IMAGE_TAG}}"
+
+echo ">> Build and load (${PLATFORM}): ${IMAGE}"
+echo ">> CodingWorkspace source: ${CW_SRC}"
+echo ">> GizmoApp source: ${GIZMO_SRC}"
+docker buildx build \
+  --platform "${PLATFORM}" \
+  --build-context "cwsrc=${CW_SRC}" \
+  --build-context "gizmosrc=${GIZMO_SRC}" \
+  --build-arg "CW_REF=${cw_ref}" \
+  --build-arg "GIZMOAPP_REF=${gizmo_ref}" \
+  --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
+  -f "${SCRIPT_DIR}/Dockerfile" \
+  -t "${IMAGE}" \
+  --load \
+  "${ROOT_DIR}"
+
+echo ">> Run the non-root image contract smoke"
+"${SCRIPT_DIR}/ci/smoke-image.sh" contract "$IMAGE" "$cw_ref" "$gizmo_ref"
+
+echo ">> Generate SBOM and vulnerability evidence before publication"
+env \
+  -u AWS_ACCESS_KEY_ID \
+  -u AWS_SECRET_ACCESS_KEY \
+  -u AWS_SESSION_TOKEN \
+  -u AWS_SECURITY_TOKEN \
+  "${SCRIPT_DIR}/ci/scan-local-image.sh" "$IMAGE" "$SECURITY_REPORT_DIR"
 
 echo ">> ECR login: ${REGISTRY}"
 aws ecr get-login-password --region "${AWS_REGION}" --profile "${AWS_PROFILE}" \
@@ -68,16 +163,34 @@ echo ">> Ensure ECR repo exists: ${IMAGE_NAME}"
 aws ecr describe-repositories --repository-names "${IMAGE_NAME}" --region "${AWS_REGION}" --profile "${AWS_PROFILE}" >/dev/null 2>&1 \
   || aws ecr create-repository --repository-name "${IMAGE_NAME}" --region "${AWS_REGION}" --profile "${AWS_PROFILE}" >/dev/null
 
-echo ">> Build (${PLATFORM}) and push: ${IMAGE}"
-echo ">> CodingWorkspace source: ${CW_SRC}"
-docker buildx build \
-  --platform "${PLATFORM}" \
-  --build-context "cwsrc=${CW_SRC}" \
-  -f "${SCRIPT_DIR}/Dockerfile" \
-  -t "${IMAGE}" \
-  --push \
-  "${ROOT_DIR}"
+echo ">> Push tested candidate: ${IMAGE}"
+docker push "$IMAGE"
+
+image_digest=""
+for attempt in $(seq 1 12); do
+  image_digest=$(aws ecr describe-images \
+    --repository-name "$IMAGE_NAME" \
+    --image-ids "imageTag=$IMAGE_TAG" \
+    --region "$AWS_REGION" \
+    --profile "$AWS_PROFILE" \
+    --query 'imageDetails[0].imageDigest' \
+    --output text 2>/dev/null || true)
+  [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
+  sleep 5
+done
+if ! [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "ECR did not return the pushed image digest: $image_digest" >&2
+  exit 1
+fi
+printf '%s@%s\n' "${REGISTRY}/${IMAGE_NAME}" "$image_digest" \
+  | tee "$SECURITY_REPORT_DIR/published-image.txt"
+(
+  cd "$SECURITY_REPORT_DIR"
+  sha256sum published-image.txt >> SHA256SUMS
+)
 
 echo ">> Done. Point z2jh singleuser.image at:"
 echo "     name: ${REGISTRY}/${IMAGE_NAME}"
 echo "     tag:  ${IMAGE_TAG}"
+echo "     digest: ${image_digest}"
+echo ">> Evidence: ${SECURITY_REPORT_DIR}"
