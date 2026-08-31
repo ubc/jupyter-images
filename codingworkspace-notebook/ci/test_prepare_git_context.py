@@ -43,6 +43,7 @@ class PrepareGitContextTests(unittest.TestCase):
         bundle = prepare(self.repository, self.head, context)
 
         self.assertEqual([BUNDLE_NAME], [path.name for path in context.iterdir()])
+        self.assertEqual(context.stat().st_mode & 0o777, 0o755)
         self.assertEqual(bundle.stat().st_mode & 0o777, 0o444)
         clone = self.root / "clone"
         git("clone", "--quiet", str(bundle), str(clone))

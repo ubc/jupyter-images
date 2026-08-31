@@ -63,6 +63,10 @@ def prepare(repository: Path, expected_ref: str, output: Path) -> Path:
         fail("source repository contains tracked, staged, or untracked changes")
 
     output.mkdir(mode=0o700, parents=True)
+    # The workflow deliberately uses umask 077 while handling its deploy key.
+    # BuildKit mounts this context in a non-root stage, so make the bundle-only
+    # directory traversable after it has been created atomically by this user.
+    output.chmod(0o755)
     bundle = output / BUNDLE_NAME
     try:
         git("bundle", "create", str(bundle), "HEAD", cwd=repository)
