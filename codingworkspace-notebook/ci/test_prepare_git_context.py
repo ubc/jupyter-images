@@ -30,10 +30,29 @@ class PrepareGitContextTests(unittest.TestCase):
         git("init", "--quiet", "--initial-branch=main", str(self.repository))
         git("config", "user.name", "Context Test", cwd=self.repository)
         git("config", "user.email", "context-test@example.invalid", cwd=self.repository)
+        git(
+            "remote",
+            "add",
+            "origin",
+            "https://bundle-user:bundle-secret@example.invalid/private.git",
+            cwd=self.repository,
+        )
+        (self.repository / ".gitignore").write_text("ignored-secret.txt\n", encoding="utf-8")
         (self.repository / "source.txt").write_text("reviewed source\n", encoding="utf-8")
-        git("add", "source.txt", cwd=self.repository)
+        git("add", ".gitignore", "source.txt", cwd=self.repository)
         git("commit", "--quiet", "-m", "Add reviewed source", cwd=self.repository)
+        (self.repository / "source.txt").write_text("reviewed source v2\n", encoding="utf-8")
+        git("commit", "--quiet", "-am", "Update reviewed source", cwd=self.repository)
+        (self.repository / "ignored-secret.txt").write_text(
+            "working-tree credential\n", encoding="utf-8"
+        )
+        unreachable_secret = self.root / "unreachable-secret.txt"
+        unreachable_secret.write_text("unreachable object credential\n", encoding="utf-8")
+        self.unreachable_object = git(
+            "hash-object", "-w", str(unreachable_secret), cwd=self.repository
+        )
         self.head = git("rev-parse", "HEAD", cwd=self.repository)
+        git("checkout", "--quiet", "--detach", self.head, cwd=self.repository)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -46,10 +65,29 @@ class PrepareGitContextTests(unittest.TestCase):
         self.assertEqual(context.stat().st_mode & 0o777, 0o755)
         self.assertEqual(bundle.stat().st_mode & 0o777, 0o444)
         clone = self.root / "clone"
-        git("clone", "--quiet", str(bundle), str(clone))
+        git("clone", "--quiet", "--no-local", "--no-hardlinks", str(bundle), str(clone))
         self.assertEqual(git("rev-parse", "HEAD", cwd=clone), self.head)
         self.assertEqual(git("rev-parse", "--is-shallow-repository", cwd=clone), "false")
         self.assertEqual(git("status", "--porcelain", cwd=clone), "")
+        self.assertNotIn("bundle-secret", git("config", "--list", cwd=clone))
+        source_objects = {
+            line.split(" ", 1)[0]
+            for line in git("rev-list", "--objects", "HEAD", cwd=self.repository).splitlines()
+        }
+        clone_objects = {
+            line.split(" ", 1)[0]
+            for line in git("rev-list", "--objects", "HEAD", cwd=clone).splitlines()
+        }
+        self.assertEqual(clone_objects, source_objects)
+        missing = subprocess.run(
+            ["git", "cat-file", "-e", self.unreachable_object],
+            cwd=clone,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        git("fsck", "--full", "--strict", cwd=clone)
 
     def test_rejects_a_mismatched_ref(self) -> None:
         with self.assertRaisesRegex(SystemExit, "does not match expected ref"):

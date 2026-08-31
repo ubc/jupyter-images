@@ -210,8 +210,9 @@ jobs:
           known_hosts="$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts"
           cwsrc="$RUNNER_TEMP/cw-src"
           gizmosrc="$RUNNER_TEMP/gizmo-src"
-          cwcontext="$RUNNER_TEMP/cw-context"
-          gizmocontext="$RUNNER_TEMP/gizmo-context"
+          sourcecontexts="$RUNNER_TEMP/cw-source-contexts"
+          cwcontext="$sourcecontexts/cw"
+          gizmocontext="$sourcecontexts/gizmo"
           cleanup() {
             rm -f "$keyfile"
           }
@@ -219,7 +220,8 @@ jobs:
           umask 077
           printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
 
-          rm -rf "$cwsrc" "$gizmosrc" "$cwcontext" "$gizmocontext"
+          rm -rf "$cwsrc" "$gizmosrc" "$sourcecontexts"
+          install -d -m 0700 "$sourcecontexts"
           GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
             git clone --quiet --no-tags git@github.com:kevinlb1/CodingWorkspace.git "$cwsrc"
           git -C "$cwsrc" checkout --quiet --detach "$CW_REF"
@@ -320,6 +322,12 @@ jobs:
           printf 'IMAGE_DIGEST=%s\n' "$digest" >> "$GITHUB_ENV"
           docker pull "$ECR_REPOSITORY@$digest"
           docker tag "$ECR_REPOSITORY@$digest" "$LOCAL_IMAGE"
+
+      - name: Remove private source staging
+        if: always() && matrix.image == 'codingworkspace-notebook'
+        run: >-
+          rm -rf -- "$RUNNER_TEMP/cw-src" "$RUNNER_TEMP/gizmo-src"
+          "$RUNNER_TEMP/cw-source-contexts"
 
       - name: Run CodingWorkspace image contract smoke
         id: contract_smoke
