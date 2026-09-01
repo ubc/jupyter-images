@@ -71,6 +71,11 @@ selection_job = job(BUILD, "select-images")
 validation_job = job(BUILD, "validate-codingworkspace")
 ordinary_job = job(BUILD, "build-and-push-ordinary")
 publish_job_text = job(BUILD, "build-scan-publish")
+legacy_aws_role = "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github"
+codingworkspace_aws_role = (
+    "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:"
+    "role/github-codingworkspace-publication"
+)
 pr_selection = job(PR_BUILD, "select-pr-images")
 pr_ordinary = job(PR_BUILD, "build-pr-ordinary")
 pr_probe = job(PR_BUILD, "probe-pr-codingworkspace-contexts")
@@ -141,7 +146,7 @@ for automatic_job, description in (
 ):
     for forbidden in (
         "environment:",
-        "CW_DEPLOY_KEY",
+        "CW_PR_BUILD_DEPLOY_KEY",
         "secrets.",
         "id-token",
         "pull-requests: write",
@@ -197,7 +202,9 @@ for required in (
     "persist-credentials: false",
     "read_pr_build_inputs.py",
     'test "$candidate_cw_ref" = "$trusted_cw_ref"',
-    "secrets.CW_DEPLOY_KEY",
+    "CODINGWORKSPACE_PR_BUILD_POLICY_ACK",
+    "main-only-required-reviewers-v1",
+    "secrets.CW_PR_BUILD_DEPLOY_KEY",
     "trusted/codingworkspace-notebook/ci/prepare_git_context.py",
     "trusted/codingworkspace-notebook/ci/prepare_git_blob_context.py",
     "--target dependency-wheelhouse-evidence",
@@ -207,8 +214,10 @@ for required in (
 ):
     if required not in trusted_pr_build:
         raise SystemExit(f"trusted exact PR build is missing {required}")
-if PR_BUILD.count("secrets.CW_DEPLOY_KEY") != 1:
+if PR_BUILD.count("secrets.CW_PR_BUILD_DEPLOY_KEY") != 1:
     raise SystemExit("the PR workflow must expose the deploy key in exactly one step")
+if "secrets.CW_DEPLOY_KEY" in PR_BUILD:
+    raise SystemExit("the PR workflow must use a distinct PR-build deploy-key secret")
 for forbidden in (
     "candidate/codingworkspace-notebook/ci/prepare_git_context.py",
     "candidate/codingworkspace-notebook/ci/prepare_git_blob_context.py",
@@ -250,6 +259,8 @@ for forbidden in (
 ):
     if forbidden in ordinary_job:
         raise SystemExit(f"ordinary image publication unexpectedly contains {forbidden}")
+if legacy_aws_role not in ordinary_job or codingworkspace_aws_role in ordinary_job:
+    raise SystemExit("ordinary images must retain only the legacy AWS publication role")
 if not re.search(r'(?m)^    branches: \["\*"\]\s*$', BUILD) or not re.search(
     r'(?m)^    tags: \["\*"\]\s*$', BUILD
 ):
@@ -270,6 +281,18 @@ for required in (
         raise SystemExit(f"publish job gate is missing {required}")
 if "environment: codingworkspace-publication" not in publish_job_text:
     raise SystemExit("publication is not bound to the protected publication environment")
+if codingworkspace_aws_role not in publish_job_text or (
+    legacy_aws_role + "\n" in publish_job_text
+):
+    raise SystemExit("CodingWorkspace publication must use its environment-scoped AWS role")
+publication_policy = step(BUILD, "Verify publication environment policy acknowledgement")
+for required in (
+    "CODINGWORKSPACE_PUBLICATION_POLICY_ACK",
+    "main-only-v1",
+    'test "$GITHUB_REF" = refs/heads/main',
+):
+    if required not in publication_policy:
+        raise SystemExit(f"publication environment policy gate is missing {required}")
 for required in (
     "needs: [select-images, validate-codingworkspace]",
     "needs.select-images.outputs.codingworkspace_images",
@@ -413,6 +436,14 @@ if not tracker_job or any(
     raise SystemExit("release tracker is not restricted to its reviewed main definition")
 if "environment: codingworkspace-publication" not in TRACK:
     raise SystemExit("release tracker is not bound to the protected publication environment")
+tracker_policy = step(TRACK, "Verify publication environment policy acknowledgement")
+for required in (
+    "CODINGWORKSPACE_PUBLICATION_POLICY_ACK",
+    "main-only-v1",
+    'test "$GITHUB_REF" = refs/heads/main',
+):
+    if required not in tracker_policy:
+        raise SystemExit(f"tracker environment policy gate is missing {required}")
 if not re.search(
     r"(?ms)^permissions: \{\}\s*$.*?^  bump:.*?^    permissions:\s*$"
     r".*?^      contents: write\s*$.*?^      actions: write\s*$",
@@ -489,6 +520,15 @@ publish_candidate = step(
 if publish_candidate.count("--push") != 1 or "--platform linux/amd64" not in publish_candidate:
     raise SystemExit("the final candidate must be published exactly once for linux/amd64")
 for required in (
+    '--metadata-file "$metadata_file"',
+    '"containerimage.digest"',
+    "Buildx did not record a valid published digest",
+):
+    if required not in publish_candidate:
+        raise SystemExit(f"published candidate metadata is missing {required}")
+if "aws ecr describe-images" in publish_candidate:
+    raise SystemExit("published candidate digest must come directly from Buildx metadata")
+for required in (
     'docker pull "$ECR_REPOSITORY@$digest"',
     'docker tag "$ECR_REPOSITORY@$digest" "$LOCAL_IMAGE"',
     "printf 'IMAGE_DIGEST=%s\\n' \"$digest\" >> \"$GITHUB_ENV\"",
@@ -510,6 +550,12 @@ if promotion.find('move_and_verify promotion latest "$IMAGE_DIGEST"') > promotio
     raise SystemExit("CodingWorkspace preview can move before latest is verified")
 if "record_receipt_field CODINGWORKSPACE_PREVIEW_MOVED true" not in promotion:
     raise SystemExit("workflow cannot distinguish completed preview promotion")
+if "--prefer-index=false" not in promotion:
+    raise SystemExit("promotion and rollback must preserve a source manifest digest")
+if "docker buildx imagetools inspect" not in promotion or "{{json .Manifest}}" not in promotion:
+    raise SystemExit("promotion tag read-back must use the authenticated registry path")
+if "aws ecr describe-images" in promotion:
+    raise SystemExit("promotion must not depend on ECR DescribeImages permission")
 
 evidence = step(BUILD, "Record release evidence")
 for required in (
@@ -649,6 +695,8 @@ for required in (
     "DEPENDENCY_WHEEL_INDEX_URL",
     "codingworkspace-dependency-wheelhouse-manifest.json",
     "codingworkspace-dependency-wheelhouse-identity.env",
+    "docker buildx imagetools inspect",
+    "{{json .Manifest}}",
 ):
     if required not in LOCAL_PUBLISH:
         raise SystemExit(f"local dependency build/evidence is missing {required}")

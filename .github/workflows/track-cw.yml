@@ -32,6 +32,14 @@ jobs:
       CW_BRANCH: release
       CW_REF_FILE: codingworkspace-notebook/CW_REF
     steps:
+      - name: Verify publication environment policy acknowledgement
+        env:
+          PUBLICATION_POLICY_ACK: ${{ vars.CODINGWORKSPACE_PUBLICATION_POLICY_ACK }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$PUBLICATION_POLICY_ACK" = main-only-v1
+
       - name: Checkout main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

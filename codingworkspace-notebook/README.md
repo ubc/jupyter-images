@@ -221,7 +221,8 @@ source installation so ordinary application releases can reuse that layer.
   a context probe, not a full-image build.
 - After reviewing a same-repository PR at one exact head SHA, a maintainer may
   dispatch `build-pr.yml` from `main`. A separate secret-free runner revalidates
-  the exact synthetic merge first; the protected job then builds the image
+  the exact synthetic merge first. After the dedicated environment is
+  configured, acknowledged, and approved, the protected job builds the image
   locally and runs both the established trusted smoke contract and the
   candidate's additions. It has no AWS/OIDC permission,
   performs no push, uploads no image, and moves no tag. Fork contributions must
@@ -247,8 +248,11 @@ source installation so ordinary application releases can reuse that layer.
 
 The hardened publication and release tracker use the
 `codingworkspace-publication` environment. Repository administrators must
-restrict that environment to deployments from `main`, store `CW_DEPLOY_KEY`
-only there (removing any repository-level copy), and configure the AWS role to
+restrict that environment to deployments from `main`, then set its
+`CODINGWORKSPACE_PUBLICATION_POLICY_ACK` environment variable to `main-only-v1`.
+Only after that policy is in place should they store `CW_DEPLOY_KEY` there
+(removing any repository-level copy) and configure the distinct
+`github-codingworkspace-publication` AWS role to
 trust only the exact GitHub OIDC subject
 `repo:ubc/jupyter-images:environment:codingworkspace-publication` (plus the
 intended audience). GitHub uses the environment—not the ref—in `sub` for jobs
@@ -256,15 +260,22 @@ that name an environment, so the environment's deployment rule enforces main.
 A branch-editable workflow `if` condition is defense in depth, not a credential
 boundary by itself.
 
-The explicitly approved exact PR build uses a separate main-only
-`codingworkspace-pr-build` environment. Require reviewer approval and place
-only the same read-only `CW_DEPLOY_KEY` there; do not add AWS secrets or
-variables. This keeps PR-build approval separate from release publication.
+The explicitly approved exact PR build uses a separate
+`codingworkspace-pr-build` environment. Create it first, restrict deployments
+to `main`, require reviewers, and only then set its
+`CODINGWORKSPACE_PR_BUILD_POLICY_ACK` environment variable to
+`main-only-required-reviewers-v1`. Finally add only a distinct read-only
+`CW_PR_BUILD_DEPLOY_KEY` environment secret; never add it at repository scope,
+and do not add AWS secrets or variables. The acknowledgement is a fail-closed
+workflow prerequisite, not proof of GitHub settings; retain an administrator
+receipt of the branch/reviewer rules. This keeps PR-build approval and source
+credentials separate from release publication.
 
 The separate ordinary-image job deliberately retains this repository's prior
 branch/tag short-SHA and `latest` publication behavior; it does not receive the
 CodingWorkspace deploy key and does not inherit CodingWorkspace lint, SBOM, or
-Trivy policy.
+Trivy policy. It keeps the legacy `github` AWS role; that role must not grant
+publication to the CodingWorkspace ECR repository.
 
 Trusted CodingWorkspace builds first export the cached architecture-specific
 manifest, then pass its exact runtime ID and raw SHA-256 back into the final

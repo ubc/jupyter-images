@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from read_pr_build_inputs import InputError, load
+from read_pr_build_inputs import MAX_INPUT_BYTES, InputError, load
 
 
 class PullRequestBuildInputTests(unittest.TestCase):
@@ -36,6 +36,69 @@ class PullRequestBuildInputTests(unittest.TestCase):
             encoding="utf-8",
         )
         with self.assertRaisesRegex(InputError, "unsupported"):
+            load(self.root)
+
+    def test_rejects_missing_duplicate_and_reordered_assignments(self) -> None:
+        runtime = self.image / "RUNTIME_PINS.env"
+        original = runtime.read_text(encoding="utf-8")
+        active = [line for line in original.splitlines() if line and not line.startswith("#")]
+
+        runtime.write_text("\n".join(active[:-1]) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(InputError, "keys or order"):
+            load(self.root)
+
+        runtime.write_text(original + f"{active[0]}\n", encoding="utf-8")
+        with self.assertRaisesRegex(InputError, "unsupported"):
+            load(self.root)
+
+        reordered = active.copy()
+        reordered[0], reordered[1] = reordered[1], reordered[0]
+        runtime.write_text("\n".join(reordered) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(InputError, "keys or order"):
+            load(self.root)
+
+    def test_rejects_oversized_and_non_utf8_inputs(self) -> None:
+        pin = self.image / "CW_REF"
+        pin.write_bytes(b"a" * (MAX_INPUT_BYTES + 1))
+        with self.assertRaisesRegex(InputError, "bounded single-link"):
+            load(self.root)
+
+        pin.write_bytes(b"\xff\xfe")
+        with self.assertRaisesRegex(InputError, "not UTF-8"):
+            load(self.root)
+
+    def test_rejects_invalid_pins_hashes_and_index(self) -> None:
+        pin = self.image / "CW_REF"
+        pin.write_text("A" * 40 + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(InputError, "full lowercase SHA-1"):
+            load(self.root)
+
+        checked_in = self.repository / "codingworkspace-notebook"
+        pin.write_bytes((checked_in / "CW_REF").read_bytes())
+        runtime = self.image / "RUNTIME_PINS.env"
+        runtime_lines = runtime.read_text(encoding="utf-8").splitlines()
+        runtime.write_text(
+            "\n".join(
+                "NODE_LINUX_AMD64_SHA256=" + "a" * 63
+                if line.startswith("NODE_LINUX_AMD64_SHA256=")
+                else line
+                for line in runtime_lines
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(InputError, "invalid NODE_LINUX_AMD64_SHA256"):
+            load(self.root)
+
+        runtime.write_bytes((checked_in / "RUNTIME_PINS.env").read_bytes())
+        dependency = self.image / "DEPENDENCY_LAYER.env"
+        dependency.write_text(
+            dependency.read_text(encoding="utf-8").replace(
+                "https://pypi.org/simple", "https://example.invalid/simple"
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(InputError, "dependency wheel index URL"):
             load(self.root)
 
     def test_rejects_symlink_and_hardlink_inputs(self) -> None:

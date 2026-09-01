@@ -15,9 +15,10 @@ on:
         type: string
 
 # The automatic tier is fork-safe and secret-free. The exact CodingWorkspace
-# tier is manual, main-definition-only, same-repository-only, and protected by
-# a dedicated main-only PR-build environment. It can read CW_DEPLOY_KEY but
-# deliberately receives no AWS/OIDC authority and performs no registry action.
+# tier is manual, main-definition-only, and same-repository-only. Operators
+# must protect its dedicated environment before acknowledging the policy gate.
+# It can read only CW_PR_BUILD_DEPLOY_KEY and deliberately receives no AWS/OIDC
+# authority or registry path.
 permissions:
   contents: read
 
@@ -254,6 +255,14 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Verify PR-build environment policy acknowledgement
+        env:
+          PR_BUILD_POLICY_ACK: ${{ vars.CODINGWORKSPACE_PR_BUILD_POLICY_ACK }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$PR_BUILD_POLICY_ACK" = main-only-required-reviewers-v1
+
       - name: Checkout reviewed main tooling
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -293,10 +302,10 @@ jobs:
 
       - name: Resolve exact private source into credential-free contexts
         env:
-          CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
+          CW_PR_BUILD_DEPLOY_KEY: ${{ secrets.CW_PR_BUILD_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          test -n "${CW_DEPLOY_KEY:-}"
+          test -n "${CW_PR_BUILD_DEPLOY_KEY:-}"
           keyfile="$RUNNER_TEMP/cw-pr-deploy-key"
           cwsrc="$RUNNER_TEMP/cw-pr-source"
           gizmosrc="$RUNNER_TEMP/gizmo-pr-source"
@@ -310,7 +319,7 @@ jobs:
           }
           trap cleanup_key EXIT
           umask 077
-          printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
+          printf '%s\n' "$CW_PR_BUILD_DEPLOY_KEY" > "$keyfile"
           rm -rf -- "$cwsrc" "$gizmosrc" "$sourcecontexts"
           install -d -m 0700 "$sourcecontexts"
 

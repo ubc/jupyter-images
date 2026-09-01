@@ -181,6 +181,14 @@ jobs:
       ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       IMAGE_NAME: ${{ matrix.image }}
     steps:
+      - name: Verify publication environment policy acknowledgement
+        env:
+          PUBLICATION_POLICY_ACK: ${{ vars.CODINGWORKSPACE_PUBLICATION_POLICY_ACK }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$PUBLICATION_POLICY_ACK" = main-only-v1
+
       - name: Checkout reviewed main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -216,7 +224,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-codingworkspace-publication
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Login to Amazon ECR
@@ -379,11 +387,18 @@ jobs:
         id: publish_candidate
         run: |
           set -euo pipefail
+          metadata_file="$RUNNER_TEMP/${IMAGE_NAME}-published-build-metadata.json"
+          rm -f -- "$metadata_file"
+          cleanup_build_metadata() {
+            rm -f -- "$metadata_file"
+          }
+          trap cleanup_build_metadata EXIT
           build_args=(
             --push
             --platform linux/amd64
             --provenance=mode=max
             --sbom=true
+            --metadata-file "$metadata_file"
             -f "$IMAGE_NAME/Dockerfile"
             -t "$ECR_IMAGE"
           )
@@ -405,21 +420,16 @@ jobs:
             )
           fi
           docker buildx build "${build_args[@]}" .
-          digest=""
-          for attempt in $(seq 1 12); do
-            digest=$(aws ecr describe-images \
-              --repository-name "$IMAGE_NAME" \
-              --image-ids "imageTag=$IMMUTABLE_TAG" \
-              --query 'imageDetails[0].imageDigest' \
-              --output text 2>/dev/null || true)
-            case "$digest" in
-              sha256:????????????????????????????????????????????????????????????????) break ;;
-            esac
-            sleep 5
-          done
+          # Buildx records the digest it actually pushed. Reading that builder
+          # result avoids a separate ECR DescribeImages control-plane lookup
+          # and its IAM/consistency failure modes. The exact-digest pull below
+          # remains the independent registry read-back before any smoke or scan.
+          digest=$(python3 -c \
+            'import json, pathlib, sys; print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")).get("containerimage.digest", ""))' \
+            "$metadata_file")
           case "$digest" in
             sha256:????????????????????????????????????????????????????????????????) ;;
-            *) echo "ECR did not return a valid immutable digest: $digest" >&2; exit 1 ;;
+            *) echo "Buildx did not record a valid published digest: $digest" >&2; exit 1 ;;
           esac
           # Every subsequent smoke/scan operates on the exact published digest.
           # A rejected candidate may remain addressable by its immutable tag but
@@ -609,11 +619,15 @@ jobs:
             printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
           }
           digest_for_tag() {
-            aws ecr describe-images \
-              --repository-name "$IMAGE_NAME" \
-              --image-ids "imageTag=$1" \
-              --query 'imageDetails[0].imageDigest' \
-              --output text 2>/dev/null || true
+            local manifest_json=""
+            manifest_json=$(docker buildx imagetools inspect \
+              "$ECR_REPOSITORY:$1" \
+              --format '{{json .Manifest}}' 2>/dev/null || true)
+            if [ -n "$manifest_json" ]; then
+              python3 -c \
+                'import json, sys; value = json.load(sys.stdin).get("digest", ""); print(value if isinstance(value, str) else "")' \
+                <<<"$manifest_json" 2>/dev/null || true
+            fi
           }
           move_and_verify() {
             local phase="$1"
@@ -629,7 +643,10 @@ jobs:
               *) echo "Invalid promotion move phase/tag: $phase/$tag" >&2; return 1 ;;
             esac
             record_receipt_field "${prefix}_ATTEMPTED_DIGEST" "$digest"
-            docker buildx imagetools create --tag "$ECR_REPOSITORY:$tag" "$ECR_REPOSITORY@$digest"
+            docker buildx imagetools create \
+              --prefer-index=false \
+              --tag "$ECR_REPOSITORY:$tag" \
+              "$ECR_REPOSITORY@$digest"
             for attempt in $(seq 1 12); do
               observed=$(digest_for_tag "$tag")
               if [ "$observed" = "$digest" ]; then
