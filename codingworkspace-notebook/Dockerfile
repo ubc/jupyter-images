@@ -237,7 +237,9 @@ RUN rm -f /tmp/CW_REF; \
     install -d --owner=${NB_UID} --group=${NB_GID} --mode=0700 \
         /tmp/codingworkspace-jupyter-runtime; \
     install --owner=root --group=root --mode=0444 /dev/null \
-        /opt/codingworkspace-jupyter/runtime/CodingWorkspace.env
+        /opt/codingworkspace-jupyter/runtime/CodingWorkspace.env; \
+    install --owner=root --group=root --mode=0444 /dev/null \
+        /opt/codingworkspace-jupyter/config/migrated
 COPY --chown=root:root --chmod=0444 codingworkspace-notebook/codingworkspace_jupyter_runtime.py \
     /opt/codingworkspace-jupyter/runtime/codingworkspace_jupyter_runtime.py
 COPY --chown=root:root --chmod=0444 codingworkspace-notebook/codingworkspace_server_proxy_config.py \
