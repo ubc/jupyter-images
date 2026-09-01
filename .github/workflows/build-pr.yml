@@ -16,7 +16,8 @@ on:
 
 # The automatic tier is fork-safe and secret-free. The exact CodingWorkspace
 # tier is manual, main-definition-only, and same-repository-only. Operators
-# must protect its dedicated environment before acknowledging the policy gate.
+# must protect its dedicated environment, prevent self-review, and disallow
+# administrator bypass before acknowledging the policy gate.
 # It can read only CW_PR_BUILD_DEPLOY_KEY and deliberately receives no AWS/OIDC
 # authority or registry path.
 permissions:
@@ -261,7 +262,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
-          test "$PR_BUILD_POLICY_ACK" = main-only-required-reviewers-v1
+          test "$PR_BUILD_POLICY_ACK" = main-only-required-reviewers-no-self-review-no-admin-bypass-v1
 
       - name: Checkout reviewed main tooling
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

@@ -248,34 +248,49 @@ source installation so ordinary application releases can reuse that layer.
 
 The hardened publication and release tracker use the
 `codingworkspace-publication` environment. Repository administrators must
-restrict that environment to deployments from `main`, then set its
-`CODINGWORKSPACE_PUBLICATION_POLICY_ACK` environment variable to `main-only-v1`.
+restrict that environment to deployments from `main` and disallow administrator
+bypass, then set its `CODINGWORKSPACE_PUBLICATION_POLICY_ACK` environment
+variable to `main-only-no-admin-bypass-v1`.
 Only after that policy is in place should they store `CW_DEPLOY_KEY` there
 (removing any repository-level copy) and configure the distinct
 `github-codingworkspace-publication` AWS role to
 trust only the exact GitHub OIDC subject
-`repo:ubc/jupyter-images:environment:codingworkspace-publication` (plus the
-intended audience). GitHub uses the environment—not the ref—in `sub` for jobs
-that name an environment, so the environment's deployment rule enforces main.
+`repo:ubc/jupyter-images:environment:codingworkspace-publication` and the exact
+audience `sts.amazonaws.com`. Pre-provision the `codingworkspace-notebook` ECR
+repository. Grant `ecr:GetAuthorizationToken` on `*`, and grant only
+`ecr:BatchCheckLayerAvailability`, `ecr:BatchGetImage`,
+`ecr:GetDownloadUrlForLayer`, `ecr:InitiateLayerUpload`,
+`ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, and `ecr:PutImage` on that
+repository ARN. `ecr:DescribeImages`, repository discovery/creation, and delete
+permissions are not required. GitHub uses the environment—not the ref—in `sub`
+for jobs that name an environment, so the environment's deployment rule
+enforces main.
 A branch-editable workflow `if` condition is defense in depth, not a credential
 boundary by itself.
 
 The explicitly approved exact PR build uses a separate
 `codingworkspace-pr-build` environment. Create it first, restrict deployments
-to `main`, require reviewers, and only then set its
+to `main`, require reviewers, enable **Prevent self-review**, and disallow
+administrator bypass. Only then set its
 `CODINGWORKSPACE_PR_BUILD_POLICY_ACK` environment variable to
-`main-only-required-reviewers-v1`. Finally add only a distinct read-only
-`CW_PR_BUILD_DEPLOY_KEY` environment secret; never add it at repository scope,
+`main-only-required-reviewers-no-self-review-no-admin-bypass-v1`. Finally add
+only a distinct read-only `CW_PR_BUILD_DEPLOY_KEY` environment secret; never
+add it at repository scope,
 and do not add AWS secrets or variables. The acknowledgement is a fail-closed
 workflow prerequisite, not proof of GitHub settings; retain an administrator
-receipt of the branch/reviewer rules. This keeps PR-build approval and source
-credentials separate from release publication.
+receipt of the branch, reviewer, self-review, and administrator-bypass rules.
+This keeps PR-build approval and source credentials separate from release
+publication.
 
 The separate ordinary-image job deliberately retains this repository's prior
 branch/tag short-SHA and `latest` publication behavior; it does not receive the
 CodingWorkspace deploy key and does not inherit CodingWorkspace lint, SBOM, or
 Trivy policy. It keeps the legacy `github` AWS role; that role must not grant
-publication to the CodingWorkspace ECR repository.
+publication to the CodingWorkspace ECR repository. Rebinding the legacy role to
+the CodingWorkspace environment would break ordinary branch/tag builds; leaving
+it broad while granting CodingWorkspace publication would let branch-editable
+ordinary workflows cross the hardened repository boundary. The distinct role
+is therefore required rather than cosmetic.
 
 Trusted CodingWorkspace builds first export the cached architecture-specific
 manifest, then pass its exact runtime ID and raw SHA-256 back into the final

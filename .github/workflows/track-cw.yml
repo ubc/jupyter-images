@@ -38,7 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
-          test "$PUBLICATION_POLICY_ACK" = main-only-v1
+          test "$PUBLICATION_POLICY_ACK" = main-only-no-admin-bypass-v1
 
       - name: Checkout main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

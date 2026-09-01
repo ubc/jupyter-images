@@ -185,23 +185,38 @@ administrator setting outside this repository.
 
 Publication and tracking jobs name the `codingworkspace-publication` GitHub
 environment. Configure it to allow deployments only from `main`, move
-`CW_DEPLOY_KEY` into it, and delete every repository-level copy. Only after the
-main-only rule is active, set the environment variable
-`CODINGWORKSPACE_PUBLICATION_POLICY_ACK=main-only-v1`. Configure a separate
+`CW_DEPLOY_KEY` into it, delete every repository-level copy, and disallow
+administrator bypass. Only after those rules are active, set the environment
+variable `CODINGWORKSPACE_PUBLICATION_POLICY_ACK=main-only-no-admin-bypass-v1`.
+Configure a separate
 `codingworkspace-pr-build` environment in this order: create it, restrict it to
-`main`, add required reviewers, set
-`CODINGWORKSPACE_PR_BUILD_POLICY_ACK=main-only-required-reviewers-v1`, and then
-add a distinct read-only `CW_PR_BUILD_DEPLOY_KEY` environment secret. It must
-have no AWS secret or variable, and neither deploy-key secret may exist at
-repository scope. The acknowledgement variables fail closed when absent; they
-do not replace an administrator receipt proving the GitHub protection settings.
+`main`, add required reviewers, enable **Prevent self-review**, disallow
+administrator bypass, set
+`CODINGWORKSPACE_PR_BUILD_POLICY_ACK=main-only-required-reviewers-no-self-review-no-admin-bypass-v1`,
+and then add a distinct read-only `CW_PR_BUILD_DEPLOY_KEY` environment secret.
+It must have no AWS secret or variable, and neither deploy-key secret may exist
+at repository scope. The acknowledgement variables fail closed when absent;
+they do not replace an administrator receipt proving the GitHub protection
+settings.
 The dedicated `github-codingworkspace-publication` AWS role trust policy must
 independently require the exact OIDC subject
-`repo:ubc/jupyter-images:environment:codingworkspace-publication` and intended
-audience. GitHub environment jobs use the environment rather than the ref in
+`repo:ubc/jupyter-images:environment:codingworkspace-publication` and the exact
+audience `sts.amazonaws.com`. Pre-provision the `codingworkspace-notebook` ECR
+repository. Grant `ecr:GetAuthorizationToken` on `*`; on only that repository
+ARN, grant `ecr:BatchCheckLayerAvailability`, `ecr:BatchGetImage`,
+`ecr:GetDownloadUrlForLayer`, `ecr:InitiateLayerUpload`,
+`ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, and `ecr:PutImage`.
+`ecr:DescribeImages`, repository discovery/creation, and deletion are not
+required. GitHub environment jobs use the environment rather than the ref in
 `sub`; the environment's deployment-branch rule is therefore what binds the
 role to main. These are release prerequisites: a contributor can edit an `if`
 condition in branch YAML.
+
+The legacy `github` role cannot safely be reused: binding it to the
+CodingWorkspace environment would break ordinary branch/tag image publication,
+while leaving it broad and adding CodingWorkspace permissions would let
+branch-editable ordinary workflows reach the hardened repository. Keep the two
+roles disjoint.
 
 ## Immutable source resolution
 
@@ -269,7 +284,7 @@ indefinite release record. Record that destination in the production change.
 | --- | --- | --- |
 | `CW_DEPLOY_KEY` | Read-only deploy key for `kevinlb1/CodingWorkspace` | `codingworkspace-publication` environment secret only; delete any repository-level copy |
 | `CW_PR_BUILD_DEPLOY_KEY` | Distinct read-only deploy key for exact approved PR builds | Reviewer-gated `codingworkspace-pr-build` environment secret only; never store at repository scope |
-| AWS GitHub OIDC role `github-codingworkspace-publication` | CodingWorkspace ECR repository/image publication only | Hardened environment job only (`id-token: write`); trust exact `repo:ubc/jupyter-images:environment:codingworkspace-publication` subject, with the environment restricted to main |
+| AWS GitHub OIDC role `github-codingworkspace-publication` | Global ECR login plus read/push/tag registry actions on only `codingworkspace-notebook`; no describe, create, or delete | Hardened environment job only (`id-token: write`); trust the exact publication-environment subject and `sts.amazonaws.com` audience; restrict the environment to main with no administrator bypass |
 | Legacy AWS GitHub OIDC role `github` | Ordinary-image ECR publication | Existing ordinary branch/tag job only; never grant CodingWorkspace repository publication through this role |
 | `GITHUB_TOKEN` | `contents: write`, `actions: write` | Tracker only, to update `CW_REF` and dispatch the trusted build |
 | Public HTTPS | Read-only GizmoApp clone and fixed scanner/runtime artifacts | Trusted build |

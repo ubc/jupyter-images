@@ -187,7 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
-          test "$PUBLICATION_POLICY_ACK" = main-only-v1
+          test "$PUBLICATION_POLICY_ACK" = main-only-no-admin-bypass-v1
 
       - name: Checkout reviewed main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -370,14 +370,9 @@ jobs:
           registry="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           ecr_image="${registry}/${IMAGE_NAME}:${tag}"
           local_image="local/${IMAGE_NAME}:${GITHUB_SHA::7}"
-          # Creating the repository is best-effort. The publication role may be
-          # able to push without holding ecr:DescribeRepositories, in which case
-          # the describe fails even though the repository exists and the create
-          # then fails with RepositoryAlreadyExistsException. Neither is fatal;
-          # a genuinely missing repository still surfaces on the push below.
-          if ! aws ecr describe-repositories --repository-names "$IMAGE_NAME" >/dev/null 2>&1; then
-            aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null 2>&1 || true
-          fi
+          # The hardened publication role deliberately cannot discover or
+          # create repositories. LTIC pre-provisions this exact repository;
+          # a missing repository fails visibly on the push below.
           printf 'IMMUTABLE_TAG=%s\n' "$tag" >> "$GITHUB_ENV"
           printf 'ECR_REPOSITORY=%s/%s\n' "$registry" "$IMAGE_NAME" >> "$GITHUB_ENV"
           printf 'ECR_IMAGE=%s\n' "$ecr_image" >> "$GITHUB_ENV"

@@ -203,7 +203,7 @@ for required in (
     "read_pr_build_inputs.py",
     'test "$candidate_cw_ref" = "$trusted_cw_ref"',
     "CODINGWORKSPACE_PR_BUILD_POLICY_ACK",
-    "main-only-required-reviewers-v1",
+    "main-only-required-reviewers-no-self-review-no-admin-bypass-v1",
     "secrets.CW_PR_BUILD_DEPLOY_KEY",
     "trusted/codingworkspace-notebook/ci/prepare_git_context.py",
     "trusted/codingworkspace-notebook/ci/prepare_git_blob_context.py",
@@ -288,7 +288,7 @@ if codingworkspace_aws_role not in publish_job_text or (
 publication_policy = step(BUILD, "Verify publication environment policy acknowledgement")
 for required in (
     "CODINGWORKSPACE_PUBLICATION_POLICY_ACK",
-    "main-only-v1",
+    "main-only-no-admin-bypass-v1",
     'test "$GITHUB_REF" = refs/heads/main',
 ):
     if required not in publication_policy:
@@ -439,7 +439,7 @@ if "environment: codingworkspace-publication" not in TRACK:
 tracker_policy = step(TRACK, "Verify publication environment policy acknowledgement")
 for required in (
     "CODINGWORKSPACE_PUBLICATION_POLICY_ACK",
-    "main-only-v1",
+    "main-only-no-admin-bypass-v1",
     'test "$GITHUB_REF" = refs/heads/main',
 ):
     if required not in tracker_policy:
@@ -502,6 +502,9 @@ if any(position < 0 for position in positions) or positions != sorted(positions)
     raise SystemExit("published-digest smoke/scan/promotion steps are missing or out of order")
 if publish_job_text.count("docker buildx build") != 2:
     raise SystemExit("the trusted job must export dependency metadata then build the final image")
+prepare_image = step(BUILD, "Prepare immutable image name")
+if "aws ecr" in prepare_image:
+    raise SystemExit("hardened publication must use a pre-provisioned ECR repository")
 dependency_build = step(BUILD, "Build exact amd64 dependency layer metadata")
 for required in (
     "--platform linux/amd64",
