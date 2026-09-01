@@ -333,7 +333,7 @@ for required in \
   X-CodingWorkspace-Proxy-Token \
   CODINGWORKSPACE_PROXY_AUTH_TOKEN \
   CODINGWORKSPACE_ISOLATION_MODE \
-  bubblewrap \
+  '"CODINGWORKSPACE_ISOLATION_MODE": "logical"' \
   '"CODINGWORKSPACE_OPENCODE_COMMAND": "/usr/local/bin/opencode"' \
   '"CODINGWORKSPACE_ISOLATION_OPENCODE_COMMAND": "/usr/local/bin/opencode"' \
   CODINGWORKSPACE_GITHUB_BACKUP_ENABLED \

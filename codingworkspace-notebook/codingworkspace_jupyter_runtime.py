@@ -175,7 +175,11 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
         ) from exc
     required_environment = {
         "CODINGWORKSPACE_AUTH_MODE": "jupyterhub",
-        "CODINGWORKSPACE_ISOLATION_MODE": "bubblewrap",
+        # "logical" is what CodingWorkspace supports; see the note in
+        # codingworkspace_server_proxy_config.py. This entry is the tamper
+        # check, so it has to match what the proxy config actually sets or the
+        # extension refuses to load and the codingworkspace route never binds.
+        "CODINGWORKSPACE_ISOLATION_MODE": "logical",
         "CODINGWORKSPACE_ISOLATION_OPENCODE_COMMAND": "/usr/local/bin/opencode",
         "CODINGWORKSPACE_REMOTE_WORKERS_ENABLED": "0",
         "CODINGWORKSPACE_PERSONAL_MODEL_AUTH_ENABLED": "0",
