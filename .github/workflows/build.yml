@@ -27,6 +27,11 @@ on:
         required: true
         type: boolean
         default: false
+      codingworkspace_candidate_sha:
+        description: Optional full lowercase CW SHA for a non-promoting candidate build
+        required: false
+        type: string
+        default: ""
 
 # Fork pull requests run only non-secret selection/validation. AWS OIDC is
 # never requested for a pull request. Ordinary images retain their existing
@@ -181,6 +186,30 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate optional CodingWorkspace candidate request
+        if: matrix.image == 'codingworkspace-notebook'
+        env:
+          REQUESTED_CW_CANDIDATE_SHA: ${{ inputs.codingworkspace_candidate_sha || '' }}
+          PROMOTE_CODINGWORKSPACE: ${{ inputs.promote_codingworkspace || false }}
+        run: |
+          set -euo pipefail
+          tracked_ref=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/CW_REF)
+          build_ref=$(python3 codingworkspace-notebook/ci/select_cw_build_ref.py \
+            --tracked-ref "$tracked_ref" \
+            --candidate-sha "$REQUESTED_CW_CANDIDATE_SHA" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --promote-codingworkspace "$PROMOTE_CODINGWORKSPACE")
+          candidate_override=false
+          candidate_sha=""
+          if [ -n "$REQUESTED_CW_CANDIDATE_SHA" ]; then
+            candidate_override=true
+            candidate_sha="$build_ref"
+          fi
+          printf 'CW_TRACKED_REF=%s\n' "$tracked_ref" >> "$GITHUB_ENV"
+          printf 'CW_REF=%s\n' "$build_ref" >> "$GITHUB_ENV"
+          printf 'CW_CANDIDATE_OVERRIDE=%s\n' "$candidate_override" >> "$GITHUB_ENV"
+          printf 'CW_CANDIDATE_SHA=%s\n' "$candidate_sha" >> "$GITHUB_ENV"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -199,8 +228,10 @@ jobs:
           CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          CW_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/CW_REF)
+          test -n "${CW_REF:-}"
+          test -n "${CW_TRACKED_REF:-}"
           GIZMOAPP_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/GIZMOAPP_REF)
+          . codingworkspace-notebook/DEPENDENCY_LAYER.env
           if [ -z "${CW_DEPLOY_KEY:-}" ]; then
             echo "CW_DEPLOY_KEY is required for a trusted codingworkspace-notebook build." >&2
             exit 1
@@ -210,6 +241,10 @@ jobs:
           known_hosts="$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts"
           cwsrc="$RUNNER_TEMP/cw-src"
           gizmosrc="$RUNNER_TEMP/gizmo-src"
+          sourcecontexts="$RUNNER_TEMP/cw-source-contexts"
+          cwcontext="$sourcecontexts/cw"
+          gizmocontext="$sourcecontexts/gizmo"
+          buildercontext="$sourcecontexts/dependency-builder"
           cleanup() {
             rm -f "$keyfile"
           }
@@ -217,9 +252,23 @@ jobs:
           umask 077
           printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
 
-          rm -rf "$cwsrc" "$gizmosrc"
+          rm -rf "$cwsrc" "$gizmosrc" "$sourcecontexts"
+          install -d -m 0700 "$sourcecontexts"
           GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
             git clone --quiet --no-tags git@github.com:kevinlb1/CodingWorkspace.git "$cwsrc"
+          test "$(git -C "$cwsrc" rev-parse --show-object-format)" = sha1
+          git -C "$cwsrc" cat-file -e "${CW_REF}^{commit}"
+          resolved_cw_ref=$(git -C "$cwsrc" rev-parse --verify "${CW_REF}^{commit}")
+          test "$resolved_cw_ref" = "$CW_REF"
+          if [ "${CW_CANDIDATE_OVERRIDE:-false}" = true ]; then
+            test "${CW_CANDIDATE_SHA:-}" = "$CW_REF"
+            # A manual candidate may test an unreleased main commit, but it
+            # cannot use an unmerged side-branch or otherwise injected object.
+            python3 codingworkspace-notebook/ci/verify_cw_candidate.py \
+              "$cwsrc" "$CW_CANDIDATE_SHA"
+          else
+            test -z "${CW_CANDIDATE_SHA:-}"
+          fi
           git -C "$cwsrc" checkout --quiet --detach "$CW_REF"
           test "$(git -C "$cwsrc" rev-parse HEAD)" = "$CW_REF"
 
@@ -228,12 +277,65 @@ jobs:
           test "$(git -C "$gizmosrc" rev-parse HEAD)" = "$GIZMOAPP_REF"
           test "$(git -C "$gizmosrc" rev-parse --show-object-format)" = sha1
 
+          # The docker-container Buildx driver does not reliably transfer a
+          # local checkout's .git directory. Pass bundle-only contexts instead:
+          # the image can still verify and archive the exact Git objects, while
+          # checkout credentials and configuration never reach the builder.
+          python3 codingworkspace-notebook/ci/prepare_git_context.py \
+            "$cwsrc" "$CW_REF" "$cwcontext"
+          python3 codingworkspace-notebook/ci/prepare_git_context.py \
+            "$gizmosrc" "$GIZMOAPP_REF" "$gizmocontext"
+          python3 codingworkspace-notebook/ci/prepare_git_blob_context.py \
+            "$cwsrc" "$DEPENDENCY_BUILDER_REF" \
+            scripts/build_dependency_wheelhouse.py \
+            "$DEPENDENCY_BUILDER_BLOB" "$buildercontext"
+
           printf 'CW_REF=%s\n' "$CW_REF" >> "$GITHUB_ENV"
           printf 'GIZMOAPP_REF=%s\n' "$GIZMOAPP_REF" >> "$GITHUB_ENV"
           . codingworkspace-notebook/RUNTIME_PINS.env
           printf 'OPENCODE_VERSION=%s\n' "$OPENCODE_VERSION" >> "$GITHUB_ENV"
-          printf 'CW_CONTEXT=%s\n' "$cwsrc" >> "$GITHUB_ENV"
-          printf 'GIZMO_CONTEXT=%s\n' "$gizmosrc" >> "$GITHUB_ENV"
+          printf 'CW_CONTEXT=%s\n' "$cwcontext" >> "$GITHUB_ENV"
+          printf 'GIZMO_CONTEXT=%s\n' "$gizmocontext" >> "$GITHUB_ENV"
+          printf 'CW_BUILDER_CONTEXT=%s\n' "$buildercontext" >> "$GITHUB_ENV"
+          printf 'DEPENDENCY_WHEELHOUSE_LAYER_VERSION=%s\n' "$DEPENDENCY_WHEELHOUSE_LAYER_VERSION" >> "$GITHUB_ENV"
+          printf 'DEPENDENCY_BUILDER_REF=%s\n' "$DEPENDENCY_BUILDER_REF" >> "$GITHUB_ENV"
+          printf 'DEPENDENCY_BUILDER_BLOB=%s\n' "$DEPENDENCY_BUILDER_BLOB" >> "$GITHUB_ENV"
+          printf 'DEPENDENCY_WHEEL_INDEX_URL=%s\n' "$DEPENDENCY_WHEEL_INDEX_URL" >> "$GITHUB_ENV"
+
+      - name: Build exact amd64 dependency layer metadata
+        id: dependency_layer
+        if: matrix.image == 'codingworkspace-notebook'
+        run: |
+          set -euo pipefail
+          dependency_export="$RUNNER_TEMP/dependency-wheelhouse-export"
+          metadata_file="$RUNNER_TEMP/dependency-wheelhouse-metadata.env"
+          rm -rf -- "$dependency_export" "$metadata_file"
+          docker buildx build \
+            --platform linux/amd64 \
+            --target dependency-wheelhouse-evidence \
+            --build-context "cwsrc=$CW_CONTEXT" \
+            --build-context "gizmosrc=$GIZMO_CONTEXT" \
+            --build-context "cwbuildersrc=$CW_BUILDER_CONTEXT" \
+            --build-arg "CW_REF=$CW_REF" \
+            --build-arg "GIZMOAPP_REF=$GIZMOAPP_REF" \
+            --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
+            --build-arg "DEPENDENCY_WHEELHOUSE_LAYER_VERSION=$DEPENDENCY_WHEELHOUSE_LAYER_VERSION" \
+            --build-arg "DEPENDENCY_BUILDER_REF=$DEPENDENCY_BUILDER_REF" \
+            --build-arg "DEPENDENCY_BUILDER_BLOB=$DEPENDENCY_BUILDER_BLOB" \
+            --build-arg "DEPENDENCY_WHEEL_INDEX_URL=$DEPENDENCY_WHEEL_INDEX_URL" \
+            --output "type=local,dest=$dependency_export" \
+            -f codingworkspace-notebook/Dockerfile .
+          manifest="$dependency_export/manifest.json"
+          test -s "$manifest"
+          python3 codingworkspace-notebook/ci/dependency_manifest_evidence.py \
+            "$manifest" "$DEPENDENCY_WHEELHOUSE_LAYER_VERSION" \
+            --format github-env > "$metadata_file"
+          cat "$metadata_file" >> "$GITHUB_ENV"
+          . "$metadata_file"
+          test -n "$DEPENDENCY_RUNTIME_ID"
+          test -n "$DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256"
+          printf 'DEPENDENCY_MANIFEST_EXPORT=%s\n' "$manifest" >> "$GITHUB_ENV"
+          printf 'CODINGWORKSPACE_IMAGE_PLATFORM=linux/amd64\n' >> "$GITHUB_ENV"
 
       - name: Prepare immutable image name
         run: |
@@ -248,7 +350,14 @@ jobs:
           if [ "$IMAGE_NAME" = codingworkspace-notebook ]; then
             test -n "${CW_REF:-}"
             test -n "${GIZMOAPP_REF:-}"
-            tag="${GITHUB_SHA::7}-cw${CW_REF:0:7}-gz${GIZMOAPP_REF:0:7}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+            if [ "${CW_CANDIDATE_OVERRIDE:-false}" = true ]; then
+              test "${CW_CANDIDATE_SHA:-}" = "$CW_REF"
+              tag="${GITHUB_SHA::7}-cw${CW_CANDIDATE_SHA}-gz${GIZMOAPP_REF:0:7}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+            else
+              test -z "${CW_CANDIDATE_SHA:-}"
+              test "$CW_REF" = "${CW_TRACKED_REF:-}"
+              tag="${GITHUB_SHA::7}-cw${CW_REF:0:7}-gz${GIZMOAPP_REF:0:7}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+            fi
           fi
           registry="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
           ecr_image="${registry}/${IMAGE_NAME}:${tag}"
@@ -272,6 +381,7 @@ jobs:
           set -euo pipefail
           build_args=(
             --push
+            --platform linux/amd64
             --provenance=mode=max
             --sbom=true
             -f "$IMAGE_NAME/Dockerfile"
@@ -281,9 +391,17 @@ jobs:
             build_args+=(
               --build-context "cwsrc=$CW_CONTEXT"
               --build-context "gizmosrc=$GIZMO_CONTEXT"
+              --build-context "cwbuildersrc=$CW_BUILDER_CONTEXT"
               --build-arg "CW_REF=$CW_REF"
+              --build-arg "CW_CANDIDATE_SHA=${CW_CANDIDATE_SHA:-}"
               --build-arg "GIZMOAPP_REF=$GIZMOAPP_REF"
               --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION"
+              --build-arg "DEPENDENCY_WHEELHOUSE_LAYER_VERSION=$DEPENDENCY_WHEELHOUSE_LAYER_VERSION"
+              --build-arg "DEPENDENCY_BUILDER_REF=$DEPENDENCY_BUILDER_REF"
+              --build-arg "DEPENDENCY_BUILDER_BLOB=$DEPENDENCY_BUILDER_BLOB"
+              --build-arg "DEPENDENCY_WHEEL_INDEX_URL=$DEPENDENCY_WHEEL_INDEX_URL"
+              --build-arg "DEPENDENCY_RUNTIME_ID=$DEPENDENCY_RUNTIME_ID"
+              --build-arg "DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256=$DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256"
             )
           fi
           docker buildx build "${build_args[@]}" .
@@ -310,6 +428,12 @@ jobs:
           docker pull "$ECR_REPOSITORY@$digest"
           docker tag "$ECR_REPOSITORY@$digest" "$LOCAL_IMAGE"
 
+      - name: Remove private source staging
+        if: always() && matrix.image == 'codingworkspace-notebook'
+        run: >-
+          rm -rf -- "$RUNNER_TEMP/cw-src" "$RUNNER_TEMP/gizmo-src"
+          "$RUNNER_TEMP/cw-source-contexts"
+
       - name: Run CodingWorkspace image contract smoke
         id: contract_smoke
         if: matrix.image == 'codingworkspace-notebook'
@@ -319,6 +443,47 @@ jobs:
 
       - name: Prepare evidence directory
         run: mkdir -p evidence
+
+      - name: Extract exact-digest dependency evidence
+        id: dependency_exact_evidence
+        if: matrix.image == 'codingworkspace-notebook'
+        run: |
+          set -euo pipefail
+          container_id=$(docker create "$LOCAL_IMAGE")
+          cleanup_container() {
+            docker rm -f "$container_id" >/dev/null 2>&1 || true
+          }
+          trap cleanup_container EXIT
+          docker cp \
+            "$container_id:/opt/codingworkspace-dependency-wheelhouse/manifest.json" \
+            evidence/codingworkspace-dependency-wheelhouse-manifest.json
+          docker cp \
+            "$container_id:/etc/codingworkspace-dependency-wheelhouse.env" \
+            evidence/codingworkspace-dependency-wheelhouse-identity.env
+          cleanup_container
+          trap - EXIT
+          cmp "$DEPENDENCY_MANIFEST_EXPORT" \
+            evidence/codingworkspace-dependency-wheelhouse-manifest.json
+          python3 codingworkspace-notebook/ci/dependency_manifest_evidence.py \
+            evidence/codingworkspace-dependency-wheelhouse-manifest.json \
+            "$DEPENDENCY_WHEELHOUSE_LAYER_VERSION" --format github-env \
+            > "$RUNNER_TEMP/exact-dependency-metadata.env"
+          expected_runtime_id=$DEPENDENCY_RUNTIME_ID
+          expected_manifest_sha256=$DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256
+          . "$RUNNER_TEMP/exact-dependency-metadata.env"
+          test "$DEPENDENCY_RUNTIME_ID" = "$expected_runtime_id"
+          test "$DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256" \
+            = "$expected_manifest_sha256"
+          grep -Fxq \
+            "DEPENDENCY_WHEELHOUSE_LAYER_VERSION=${DEPENDENCY_WHEELHOUSE_LAYER_VERSION}" \
+            evidence/codingworkspace-dependency-wheelhouse-identity.env
+          grep -Fxq "DEPENDENCY_RUNTIME_ID=${DEPENDENCY_RUNTIME_ID}" \
+            evidence/codingworkspace-dependency-wheelhouse-identity.env
+          grep -Fxq \
+            "DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256=${DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256}" \
+            evidence/codingworkspace-dependency-wheelhouse-identity.env
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$LOCAL_IMAGE")" \
+            = linux/amd64
 
       - name: Generate SPDX SBOM
         id: sbom
@@ -372,10 +537,22 @@ jobs:
             printf 'image=%s\n' "${ECR_IMAGE:-not-published}"
             printf 'digest=%s\n' "${IMAGE_DIGEST:-not-published}"
             printf 'codingworkspace_commit=%s\n' "${CW_REF:-not-applicable}"
+            printf 'codingworkspace_tracked_commit=%s\n' "${CW_TRACKED_REF:-not-applicable}"
+            printf 'codingworkspace_candidate_commit=%s\n' "${CW_CANDIDATE_SHA:-not-requested}"
+            printf 'codingworkspace_candidate_override=%s\n' "${CW_CANDIDATE_OVERRIDE:-false}"
             printf 'gizmoapp_commit=%s\n' "${GIZMOAPP_REF:-not-applicable}"
+            printf 'image_platform=%s\n' "${CODINGWORKSPACE_IMAGE_PLATFORM:-not-applicable}"
+            printf 'dependency_builder_commit=%s\n' "${DEPENDENCY_BUILDER_REF:-not-applicable}"
+            printf 'dependency_builder_blob=%s\n' "${DEPENDENCY_BUILDER_BLOB:-not-applicable}"
+            printf 'dependency_wheel_index_url=%s\n' "${DEPENDENCY_WHEEL_INDEX_URL:-not-applicable}"
+            printf 'dependency_layer_version=%s\n' "${DEPENDENCY_WHEELHOUSE_LAYER_VERSION:-not-applicable}"
+            printf 'dependency_runtime_id=%s\n' "${DEPENDENCY_RUNTIME_ID:-not-applicable}"
+            printf 'dependency_manifest_sha256=%s\n' "${DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256:-not-applicable}"
             printf 'prepromotion_job_status=%s\n' "${{ job.status }}"
             printf 'immutable_publish_result=%s\n' "${{ steps.publish_candidate.outcome }}"
             printf 'contract_smoke_result=%s\n' "${{ steps.contract_smoke.outcome }}"
+            printf 'dependency_layer_result=%s\n' "${{ steps.dependency_layer.outcome }}"
+            printf 'dependency_exact_evidence_result=%s\n' "${{ steps.dependency_exact_evidence.outcome }}"
             printf 'sbom_result=%s\n' "${{ steps.sbom.outcome }}"
             printf 'vulnerability_scan_result=%s\n' "${{ steps.vulnerability_scan.outcome }}"
             printf 'vulnerability_gate_result=%s\n' "${{ steps.vulnerability_gate.outcome }}"
@@ -410,12 +587,27 @@ jobs:
       # a transfer window; production separately requires checksum verification
       # and transfer into the course's independently backed-up release record.
       - name: Promote approved CodingWorkspace release
+        id: promote_codingworkspace
         if: >-
+          success() &&
           matrix.image == 'codingworkspace-notebook' &&
           github.event_name == 'workflow_dispatch' &&
-          inputs.promote_codingworkspace == true
+          inputs.promote_codingworkspace == true &&
+          inputs.codingworkspace_candidate_sha == '' &&
+          env.CW_CANDIDATE_OVERRIDE != 'true'
         run: |
           set -euo pipefail
+          record_receipt_field() {
+            local key="$1"
+            local value="$2"
+            case "$key" in
+              *[!A-Z0-9_]*) echo "Invalid promotion receipt field: $key" >&2; return 1 ;;
+            esac
+            case "$value" in
+              *$'\n'* | *$'\r'*) echo "Invalid multiline promotion receipt value" >&2; return 1 ;;
+            esac
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
+          }
           digest_for_tag() {
             aws ecr describe-images \
               --repository-name "$IMAGE_NAME" \
@@ -424,21 +616,94 @@ jobs:
               --output text 2>/dev/null || true
           }
           move_and_verify() {
-            local tag="$1"
-            local digest="$2"
+            local phase="$1"
+            local tag="$2"
+            local digest="$3"
             local observed=""
+            local prefix=""
+            case "$phase:$tag" in
+              promotion:latest) prefix=PROMOTION_LATEST ;;
+              promotion:preview) prefix=PROMOTION_PREVIEW ;;
+              rollback:latest) prefix=ROLLBACK_LATEST ;;
+              rollback:preview) prefix=ROLLBACK_PREVIEW ;;
+              *) echo "Invalid promotion move phase/tag: $phase/$tag" >&2; return 1 ;;
+            esac
+            record_receipt_field "${prefix}_ATTEMPTED_DIGEST" "$digest"
             docker buildx imagetools create --tag "$ECR_REPOSITORY:$tag" "$ECR_REPOSITORY@$digest"
             for attempt in $(seq 1 12); do
               observed=$(digest_for_tag "$tag")
-              [ "$observed" = "$digest" ] && return 0
+              if [ "$observed" = "$digest" ]; then
+                record_receipt_field "${prefix}_READBACK_DIGEST" "$observed"
+                return 0
+              fi
               sleep 5
             done
+            record_receipt_field "${prefix}_READBACK_DIGEST" "${observed:-not-observed}"
             echo "$tag resolved to $observed, expected $digest" >&2
             return 1
           }
 
+          rollback_armed=false
+          previous_latest=not-observed
+          previous_preview=not-observed
+          finalize_promotion() {
+            local status=$?
+            local final_latest=""
+            local final_preview=""
+            local outcome=""
+            trap - EXIT
+            set +e
+
+            final_latest=$(digest_for_tag latest)
+            final_preview=$(digest_for_tag preview)
+            if [ "$status" -eq 0 ] && {
+              [ "$final_latest" != "$IMAGE_DIGEST" ] ||
+              [ "$final_preview" != "$IMAGE_DIGEST" ];
+            }; then
+              echo "Final promotion readback did not retain the tested digest." >&2
+              status=1
+            fi
+
+            if [ "$status" -ne 0 ] && [ "$rollback_armed" = true ]; then
+              echo "Promotion failed; restoring previous moving-tag digests." >&2
+              move_and_verify rollback latest "$previous_latest" || true
+              move_and_verify rollback preview "$previous_preview" || true
+              final_latest=$(digest_for_tag latest)
+              final_preview=$(digest_for_tag preview)
+              if [ "$final_latest" = "$previous_latest" ] && \
+                 [ "$final_preview" = "$previous_preview" ]; then
+                outcome=failed_rolled_back
+              else
+                outcome=failed_rollback_incomplete
+              fi
+            elif [ "$status" -eq 0 ]; then
+              outcome=promoted
+            else
+              outcome=failed_before_tag_moves
+            fi
+
+            if [ "$status" -ne 0 ]; then
+              record_receipt_field CODINGWORKSPACE_LATEST_MOVED false
+              record_receipt_field CODINGWORKSPACE_PREVIEW_MOVED false
+            fi
+            record_receipt_field PROMOTION_FINAL_LATEST_DIGEST "${final_latest:-not-observed}"
+            record_receipt_field PROMOTION_FINAL_PREVIEW_DIGEST "${final_preview:-not-observed}"
+            record_receipt_field PROMOTION_OUTCOME "$outcome"
+            record_receipt_field PROMOTION_STEP_EXIT_STATUS "$status"
+            exit "$status"
+          }
+          trap finalize_promotion EXIT
+
+          record_receipt_field PROMOTION_RECEIPT_STARTED true
+          record_receipt_field PROMOTION_TESTED_DIGEST "$IMAGE_DIGEST"
+          record_receipt_field PROMOTION_OUTCOME started
+          record_receipt_field CODINGWORKSPACE_LATEST_MOVED false
+          record_receipt_field CODINGWORKSPACE_PREVIEW_MOVED false
+
           previous_latest=$(digest_for_tag latest)
           previous_preview=$(digest_for_tag preview)
+          record_receipt_field PROMOTION_PREVIOUS_LATEST_DIGEST "${previous_latest:-not-observed}"
+          record_receipt_field PROMOTION_PREVIOUS_PREVIEW_DIGEST "${previous_preview:-not-observed}"
           case "$previous_latest" in
             sha256:????????????????????????????????????????????????????????????????) ;;
             *) echo "latest has no rollback-safe immutable digest: $previous_latest" >&2; exit 1 ;;
@@ -447,27 +712,82 @@ jobs:
             sha256:????????????????????????????????????????????????????????????????) ;;
             *) echo "preview has no rollback-safe immutable digest: $previous_preview" >&2; exit 1 ;;
           esac
+          rollback_armed=true
 
-          restore_previous_tags() {
-            local status=$?
-            trap - EXIT
-            if [ "$status" -ne 0 ]; then
-              echo "Promotion failed; restoring previous moving-tag digests." >&2
-              move_and_verify latest "$previous_latest" || status=1
-              move_and_verify preview "$previous_preview" || status=1
-            fi
-            exit "$status"
-          }
-          trap restore_previous_tags EXIT
-
-          move_and_verify latest "$IMAGE_DIGEST"
-          printf 'CODINGWORKSPACE_LATEST_MOVED=true\n' >> "$GITHUB_ENV"
+          move_and_verify promotion latest "$IMAGE_DIGEST"
+          record_receipt_field CODINGWORKSPACE_LATEST_MOVED true
 
           # Preview is the Hub-consumed moving tag, so update it last and only
           # after latest has been observed at the tested digest.
-          move_and_verify preview "$IMAGE_DIGEST"
-          printf 'CODINGWORKSPACE_PREVIEW_MOVED=true\n' >> "$GITHUB_ENV"
-          trap - EXIT
+          move_and_verify promotion preview "$IMAGE_DIGEST"
+          record_receipt_field CODINGWORKSPACE_PREVIEW_MOVED true
+
+      - name: Record CodingWorkspace promotion receipt
+        if: >-
+          always() &&
+          matrix.image == 'codingworkspace-notebook' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.promote_codingworkspace == true &&
+          inputs.codingworkspace_candidate_sha == '' &&
+          env.CW_CANDIDATE_OVERRIDE != 'true' &&
+          env.PROMOTION_RECEIPT_STARTED == 'true'
+        run: |
+          set -euo pipefail
+          install -d -m 0700 promotion-receipt
+          {
+            printf 'receipt_version=1\n'
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'workflow=%s\n' "$GITHUB_WORKFLOW"
+            printf 'workflow_ref=%s\n' "$GITHUB_WORKFLOW_REF"
+            printf 'workflow_sha=%s\n' "$GITHUB_WORKFLOW_SHA"
+            printf 'workflow_run=%s/actions/runs/%s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'workflow_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'event_name=%s\n' "$GITHUB_EVENT_NAME"
+            printf 'ref=%s\n' "$GITHUB_REF"
+            printf 'jupyter_images_commit=%s\n' "$GITHUB_SHA"
+            printf 'codingworkspace_commit=%s\n' "$CW_REF"
+            printf 'codingworkspace_tracked_commit=%s\n' "$CW_TRACKED_REF"
+            printf 'gizmoapp_commit=%s\n' "$GIZMOAPP_REF"
+            printf 'image_repository=%s\n' "$ECR_REPOSITORY"
+            printf 'immutable_tag=%s\n' "$IMMUTABLE_TAG"
+            printf 'tested_digest=%s\n' "$PROMOTION_TESTED_DIGEST"
+            printf 'previous_latest_digest=%s\n' "${PROMOTION_PREVIOUS_LATEST_DIGEST:-not-recorded}"
+            printf 'previous_preview_digest=%s\n' "${PROMOTION_PREVIOUS_PREVIEW_DIGEST:-not-recorded}"
+            printf 'promotion_latest_attempted_digest=%s\n' "${PROMOTION_LATEST_ATTEMPTED_DIGEST:-not-attempted}"
+            printf 'promotion_latest_readback_digest=%s\n' "${PROMOTION_LATEST_READBACK_DIGEST:-not-observed}"
+            printf 'promotion_preview_attempted_digest=%s\n' "${PROMOTION_PREVIEW_ATTEMPTED_DIGEST:-not-attempted}"
+            printf 'promotion_preview_readback_digest=%s\n' "${PROMOTION_PREVIEW_READBACK_DIGEST:-not-observed}"
+            printf 'rollback_latest_attempted_digest=%s\n' "${ROLLBACK_LATEST_ATTEMPTED_DIGEST:-not-attempted}"
+            printf 'rollback_latest_readback_digest=%s\n' "${ROLLBACK_LATEST_READBACK_DIGEST:-not-observed}"
+            printf 'rollback_preview_attempted_digest=%s\n' "${ROLLBACK_PREVIEW_ATTEMPTED_DIGEST:-not-attempted}"
+            printf 'rollback_preview_readback_digest=%s\n' "${ROLLBACK_PREVIEW_READBACK_DIGEST:-not-observed}"
+            printf 'final_latest_digest=%s\n' "${PROMOTION_FINAL_LATEST_DIGEST:-not-observed}"
+            printf 'final_preview_digest=%s\n' "${PROMOTION_FINAL_PREVIEW_DIGEST:-not-observed}"
+            printf 'outcome=%s\n' "${PROMOTION_OUTCOME:-unknown}"
+            printf 'promotion_step_exit_status=%s\n' "${PROMOTION_STEP_EXIT_STATUS:-unknown}"
+            printf 'promotion_step_result=%s\n' "${{ steps.promote_codingworkspace.outcome }}"
+            printf 'actions_artifact_retention_days=90\n'
+          } > promotion-receipt/codingworkspace-promotion.txt
+          (
+            cd promotion-receipt
+            sha256sum codingworkspace-promotion.txt > SHA256SUMS
+          )
+
+      - name: Upload CodingWorkspace promotion receipt
+        if: >-
+          always() &&
+          matrix.image == 'codingworkspace-notebook' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.promote_codingworkspace == true &&
+          inputs.codingworkspace_candidate_sha == '' &&
+          env.CW_CANDIDATE_OVERRIDE != 'true' &&
+          env.PROMOTION_RECEIPT_STARTED == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codingworkspace-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}-promotion-receipt
+          path: promotion-receipt/
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Summarize verified moving tags
         if: always()

@@ -41,6 +41,19 @@ reject_ere_matches() {
 CW_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/CW_REF)
 GIZMOAPP_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/GIZMOAPP_REF)
 printf 'Validated full source pins: CW=%s GizmoApp=%s\n' "$CW_REF" "$GIZMOAPP_REF"
+test "$CW_REF" = 3f7d93d4d1fc72c809c24df4757ecc91cdf4b415 \
+  || fail "the image-source integration must retain the accepted CodingWorkspace release pin"
+test "$GIZMOAPP_REF" = 2d9cad4af9decfe5336306f0e4afc529082a37fb \
+  || fail "the wheelhouse image must use the reviewed offline-installer GizmoApp commit"
+. codingworkspace-notebook/DEPENDENCY_LAYER.env
+test "$DEPENDENCY_WHEELHOUSE_LAYER_VERSION" = v1 \
+  || fail "the dependency layer version is not the reviewed value"
+test "$DEPENDENCY_BUILDER_REF" = 83d4956dc2d091309daaf7be32c350c96d8b2aa2 \
+  || fail "the dependency builder commit is not the reviewed source"
+test "$DEPENDENCY_BUILDER_BLOB" = 7a30db859d3451293f9193b75175801b7ed49ec5 \
+  || fail "the dependency builder blob is not the reviewed program"
+test "$DEPENDENCY_WHEEL_INDEX_URL" = https://pypi.org/simple \
+  || fail "the dependency wheel source is not the reviewed public index"
 
 for workflow in .github/workflows/*.yml; do
   if command -v ruby >/dev/null 2>&1; then
@@ -83,6 +96,11 @@ for path in sorted(Path("codingworkspace-notebook").glob("*.py")) + sorted(
     compile(path.read_text(encoding="utf-8"), str(path), "exec")
 PY
 python3 codingworkspace-notebook/ci/validate_ci_policy.py
+python3 codingworkspace-notebook/ci/test_prepare_git_context.py -v
+python3 codingworkspace-notebook/ci/test_select_cw_build_ref.py -v
+python3 codingworkspace-notebook/ci/test_verify_cw_candidate.py -v
+python3 codingworkspace-notebook/ci/test_prepare_git_blob_context.py -v
+python3 codingworkspace-notebook/ci/test_dependency_contract.py -v
 python3 codingworkspace-notebook/ci/test_update_opencode_release.py -v
 
 expected_host_fingerprint='SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
@@ -120,7 +138,28 @@ reject_ere_matches \
   "the image may not default the Hub-owned pod termination grace assertion" \
   'CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS' "$dockerfile"
 grep -Eq 'bubblewrap' "$dockerfile" || fail "Bubblewrap is not installed"
+grep -Fq 'test "${TARGETARCH}" = "amd64"' "$dockerfile" \
+  || fail "the reviewed image is not pinned to amd64"
 grep -Eq 'from=gizmosrc' "$dockerfile" || fail "the pinned GizmoApp build context is not used"
+grep -Eq 'from=cwbuildersrc' "$dockerfile" \
+  || fail "the reviewed dependency builder context is not used"
+grep -Eq 'git bundle list-heads /cwsrc/source\.bundle' "$dockerfile" \
+  || fail "CodingWorkspace is not verified from its bundle-only build context"
+grep -Eq 'git bundle list-heads /gizmosrc/source\.bundle' "$dockerfile" \
+  || fail "GizmoApp is not verified from its bundle-only build context"
+grep -Fq 'git hash-object /cwbuildersrc/build_dependency_wheelhouse.py' "$dockerfile" \
+  || fail "the dependency builder blob is not reverified inside BuildKit"
+grep -Fq 'PIP_INDEX_URL="${DEPENDENCY_WHEEL_INDEX_URL}"' "$dockerfile" \
+  || fail "the wheelhouse source is not fixed to public PyPI"
+grep -Fq 'env -u PIP_EXTRA_INDEX_URL' "$dockerfile" \
+  || fail "the wheelhouse build may inherit an extra package index"
+grep -Fq 'finalize_dependency_manifest' "$dockerfile" \
+  || fail "the exact wheel set is not bound into the finalized runtime identity"
+reject_ere_matches \
+  "dependency identity verification must not use removable Python assertions" \
+  'assert metadata\[' "$dockerfile"
+grep -Fq '/opt/codingworkspace-dependency-wheelhouse' "$dockerfile" \
+  || fail "the immutable dependency wheelhouse is not built into the image"
 grep -Eq '/usr/local/sbin/codingworkspace-prestop' "$dockerfile" \
   || fail "the image-side preStop helper is not installed"
 grep -Eq 'git .* archive --format=tar' "$dockerfile" \
@@ -257,6 +296,7 @@ PY
 
 server_config=codingworkspace-notebook/codingworkspace_server_proxy_config.py
 runtime_config=codingworkspace-notebook/codingworkspace_jupyter_runtime.py
+dependency_config=codingworkspace-notebook/codingworkspace_dependency_contract.py
 grep -Fq 'parse_termination_grace_seconds(' "$server_config" \
   || fail "Jupyter startup does not validate the asserted pod termination grace"
 grep -Fq 'derive_codingworkspace_shutdown_seconds(' "$server_config" \
@@ -274,6 +314,18 @@ grep -Fq 'credential_issued_at_epoch != 0' "$runtime_config" \
 reject_ere_matches \
   "Jupyter restart time must not be misreported as model credential issuance" \
   'credential_issued_at_epoch = str\(int\(time\.time\(\)\)\)' "$server_config"
+grep -Fq 'image_dependency_environment()' "$server_config" \
+  || fail "Jupyter startup does not validate the baked dependency identity"
+for required in \
+  CODINGWORKSPACE_DEPENDENCY_WHEELHOUSE \
+  CODINGWORKSPACE_DEPENDENCY_WHEELHOUSE_MODE \
+  CODINGWORKSPACE_DEPENDENCY_RUNTIME_ID \
+  '"CODINGWORKSPACE_PREVIEW_IDLE_TIMEOUT_SECONDS": "600"'; do
+  grep -Fq "$required" "$server_config" "$dependency_config" \
+    || fail "the fixed Hub dependency/idle environment is missing $required"
+done
+grep -Fq 'require_current_python=True' "$dependency_config" \
+  || fail "the wheelhouse manifest is not compared with the final Python runtime"
 
 config_text=$(cat codingworkspace-notebook/*.py)
 for required in \

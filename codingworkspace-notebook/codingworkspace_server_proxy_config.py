@@ -22,6 +22,9 @@ from codingworkspace_jupyter_runtime import (  # noqa: E402
     derive_codingworkspace_shutdown_seconds,
     parse_termination_grace_seconds,
 )
+from codingworkspace_dependency_contract import (  # noqa: E402
+    image_dependency_environment,
+)
 
 
 proxy_token = secrets.token_urlsafe(48)
@@ -96,6 +99,7 @@ def image_runtime_pins(path: Path = Path("/etc/codingworkspace-runtime-pins.env"
 
 
 opencode_runtime_version = image_runtime_pins()["OPENCODE_VERSION"]
+dependency_environment = image_dependency_environment()
 course_control_url = os.environ.get("CODINGWORKSPACE_COURSE_CONTROL_URL", "").strip().rstrip("/")
 course_control_environment: dict[str, str] = {}
 if course_control_url:
@@ -178,6 +182,9 @@ cw_env = {
     "CODINGWORKSPACE_REPOSITORY_IMPORT_ENABLED": "1",
     "CODINGWORKSPACE_REPOSITORY_IMPORT_HOST": "github.students.cs.ubc.ca",
     "CODINGWORKSPACE_STARTER_REPO_URL": "/opt/codingworkspace-starters/GizmoApp",
+    # Root-owned image dependency acceleration. The loader rejects any runtime
+    # ID, final-Python identity, wheel-set hash, or raw manifest hash mismatch.
+    **dependency_environment,
     # Explicit retained-home paths.
     "CODINGWORKSPACE_WORKSPACE_ROOT": f"{cw_root}/workspaces",
     "CODINGWORKSPACE_ISOLATED_WORKSPACE_ROOT": f"{cw_root}/isolated-workspaces",
@@ -203,6 +210,7 @@ cw_env = {
     "CODINGWORKSPACE_TOTAL_STORAGE_QUOTA_MB": "5120",
     "CODINGWORKSPACE_MIN_FREE_DISK_MB": "512",
     "CODINGWORKSPACE_MAX_WORKSPACES_PER_USER": "20",
+    "CODINGWORKSPACE_PREVIEW_IDLE_TIMEOUT_SECONDS": "600",
     "CODINGWORKSPACE_MAX_USER_RUNNING_TURNS": "1",
     "CODINGWORKSPACE_MAX_USER_QUEUED_TURNS": "2",
     # Derive the child deadline from the Hub's asserted pod grace period. The
