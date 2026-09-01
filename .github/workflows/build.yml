@@ -371,8 +371,8 @@ jobs:
           ecr_image="${registry}/${IMAGE_NAME}:${tag}"
           local_image="local/${IMAGE_NAME}:${GITHUB_SHA::7}"
           # The hardened publication role deliberately cannot discover or
-          # create repositories. LTIC pre-provisions this exact repository;
-          # a missing repository fails visibly on the push below.
+          # create repositories. The repository already exists; if it is ever
+          # missing, the push below fails visibly.
           printf 'IMMUTABLE_TAG=%s\n' "$tag" >> "$GITHUB_ENV"
           printf 'ECR_REPOSITORY=%s/%s\n' "$registry" "$IMAGE_NAME" >> "$GITHUB_ENV"
           printf 'ECR_IMAGE=%s\n' "$ecr_image" >> "$GITHUB_ENV"

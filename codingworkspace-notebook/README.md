@@ -256,8 +256,9 @@ Only after that policy is in place should they store `CW_DEPLOY_KEY` there
 `github-codingworkspace-publication` AWS role to
 trust only the exact GitHub OIDC subject
 `repo:ubc/jupyter-images:environment:codingworkspace-publication` and the exact
-audience `sts.amazonaws.com`. Pre-provision the `codingworkspace-notebook` ECR
-repository. Grant `ecr:GetAuthorizationToken` on `*`, and grant only
+audience `sts.amazonaws.com`. Retain the existing `codingworkspace-notebook`
+ECR repository, to which the accepted PR14 follow-up already pushed. Grant
+`ecr:GetAuthorizationToken` on `*`, and grant only
 `ecr:BatchCheckLayerAvailability`, `ecr:BatchGetImage`,
 `ecr:GetDownloadUrlForLayer`, `ecr:InitiateLayerUpload`,
 `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, and `ecr:PutImage` on that

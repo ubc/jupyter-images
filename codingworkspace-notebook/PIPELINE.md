@@ -201,8 +201,9 @@ settings.
 The dedicated `github-codingworkspace-publication` AWS role trust policy must
 independently require the exact OIDC subject
 `repo:ubc/jupyter-images:environment:codingworkspace-publication` and the exact
-audience `sts.amazonaws.com`. Pre-provision the `codingworkspace-notebook` ECR
-repository. Grant `ecr:GetAuthorizationToken` on `*`; on only that repository
+audience `sts.amazonaws.com`. Retain the existing `codingworkspace-notebook`
+ECR repository, to which the accepted PR14 follow-up already pushed. Grant
+`ecr:GetAuthorizationToken` on `*`; on only that repository
 ARN, grant `ecr:BatchCheckLayerAvailability`, `ecr:BatchGetImage`,
 `ecr:GetDownloadUrlForLayer`, `ecr:InitiateLayerUpload`,
 `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, and `ecr:PutImage`.
