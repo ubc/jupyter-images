@@ -202,7 +202,13 @@ PY
       git clone --quiet --no-local --no-hardlinks "$starter" "$offline_env/GizmoApp"
       (
         cd "$offline_env/GizmoApp"
-        env -u PIP_EXTRA_INDEX_URL \
+        # Drop PYTHONSAFEPATH the way the platform does. The image sets it
+        # image-wide, but CodingWorkspace starts the starter through
+        # app_process_env(), whose APP_ENV_ALLOWED_VARS allow-list does not
+        # include it. Leaving it set here makes the smoke test a configuration
+        # no student ever runs: server/manage.py imports gizmoapp_server from
+        # its own directory, which PYTHONSAFEPATH removes from sys.path.
+        env -u PIP_EXTRA_INDEX_URL -u PYTHONSAFEPATH \
           ALLOW_NETWORK_INSTALL=1 \
           PIP_CONFIG_FILE=/dev/null \
           PIP_FIND_LINKS="file://$wheelhouse" \
@@ -218,7 +224,8 @@ PY
           fi
         }
         trap stop_gizmo EXIT
-        GIZMOAPP_ENV=development \
+        env -u PYTHONSAFEPATH \
+          GIZMOAPP_ENV=development \
           GIZMOAPP_PORT=18001 \
           GIZMOAPP_URL_PREFIX= \
           .venv/bin/gunicorn --workers 1 --bind 127.0.0.1:18001 \
