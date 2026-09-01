@@ -92,6 +92,13 @@ RUN --mount=type=bind,from=gizmosrc,target=/gizmosrc \
     chown -R root:root /opt/codingworkspace-starters/GizmoApp; \
     find /opt/codingworkspace-starters/GizmoApp -type d -exec chmod 0555 '{}' +; \
     find /opt/codingworkspace-starters/GizmoApp -type f -exec chmod 0444 '{}' +; \
+    # The starter stays root-owned and read-only on purpose, but the notebook
+    # user must still be able to clone it: CODINGWORKSPACE_STARTER_REPO_URL
+    # points here, and git refuses to read a repository owned by another user
+    # ("detected dubious ownership") unless it is marked safe. Both entries are
+    # required - marking only the work tree still fails on the .git directory.
+    git config --system --add safe.directory /opt/codingworkspace-starters/GizmoApp; \
+    git config --system --add safe.directory /opt/codingworkspace-starters/GizmoApp/.git; \
     rm -f /tmp/GIZMOAPP_REF
 
 # Build the architecture-specific binary wheelhouse with the exact interpreter
