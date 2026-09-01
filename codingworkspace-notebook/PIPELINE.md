@@ -15,7 +15,17 @@ intermediate bundle-only image to deploy and no second wheelhouse PR to wait for
 ```text
 fork or same-repo PR
   └─ select changed images: no secrets, no AWS, no image publication
-       └─ CodingWorkspace/workflow paths only: run CW static validation
+       ├─ ordinary images: complete local Buildx build, no push
+       └─ CodingWorkspace/workflow paths: static validation plus
+          docker-container bundle-context export/byte comparison
+          (honestly not a complete private-source image build)
+
+reviewed same-repo image PR + exact reviewed head SHA
+  └─ manual build-pr.yml dispatch from main
+       ├─ separate secret-free runner revalidates exact synthetic merge
+       └─ protected environment approval → exact local build + established
+          and candidate image-contract smokes
+          (read-only CW key only; no AWS/OIDC, push, artifact, or tag movement)
 
 reviewed jupyter-images main push touching CodingWorkspace
   └─ validate → export exact amd64 dependency identity
@@ -89,7 +99,37 @@ changing `CW_REF`, and it has no authority to move `preview` or `latest`.
 
 ## Workflow policy
 
-`build.yml` has four separated paths:
+`build.yml` retains its four release paths. `build-pr.yml` adds two build-only
+trust tiers before them:
+
+1. **Automatic fork-safe build coverage.** Selected ordinary images receive a
+   complete local Buildx build. CodingWorkspace changes exercise the candidate
+   context-preparation helper and actual Dockerfile parser with a scratch
+   `source-context-transport` target, using bundle-only public fixtures through
+   the same `docker-container` driver as CI. The exported bundles are compared
+   byte-for-byte. No automatic PR job references a secret, environment, AWS
+   action, OIDC permission, registry, cache, or artifact.
+2. **Explicit exact CodingWorkspace PR build.** A maintainer dispatches the
+   reviewed `main` workflow with one open same-repository PR number and the full
+   head SHA just reviewed. The resolver rejects forks, non-main bases, stale
+   heads, non-main workflow definitions, and synthetic-merge drift. A separate
+   secret-free runner repeats static and context checks. Only then can required
+   reviewers approve the dedicated `codingworkspace-pr-build` environment job. It
+   converts the pinned private clone to credential-free contexts, deletes the
+   key and clone, builds and loads the candidate locally, and runs both the
+   established trusted image contract and any candidate contract additions.
+   The job has `contents: read` only and contains no publish,
+   promotion, tag-movement, evidence-upload, or AWS path.
+
+The exact tier cannot safely run automatically for arbitrary fork code.
+Providing the private source context to a candidate Dockerfile necessarily
+lets that Dockerfile read it and potentially transmit it. Neither withheld
+secrets nor an ephemeral runner changes that fact. A fork contribution must be
+mirrored onto a reviewed same-repository branch before explicit approval. The
+workflow intentionally avoids both `pull_request_target` and privileged
+`workflow_run` checkout patterns.
+
+The release paths remain:
 
 1. **Non-secret selection.** Runs for every PR, branch/tag push, and dispatch
    with only `contents: read`. It determines the changed image directories and
@@ -141,10 +181,12 @@ start a push workflow.
 dispatch. Branch protection on `main` and required validation remain an
 administrator setting outside this repository.
 
-Both CodingWorkspace credential-bearing jobs name the
-`codingworkspace-publication` GitHub environment. Configure that environment to
-allow deployments only from `main`, move `CW_DEPLOY_KEY` into it, and delete
-every repository-level copy. The AWS role trust policy must independently
+Publication and tracking jobs name the `codingworkspace-publication` GitHub
+environment. Configure it to allow deployments only from `main`, move
+`CW_DEPLOY_KEY` into it, and delete every repository-level copy. Configure a
+separate `codingworkspace-pr-build` environment that is also main-only, requires
+review, contains only the same read-only `CW_DEPLOY_KEY`, and has no AWS secret
+or variable. The AWS role trust policy must independently
 require the exact OIDC subject
 `repo:ubc/jupyter-images:environment:codingworkspace-publication` and intended
 audience. GitHub environment jobs use the environment rather than the ref in
@@ -216,10 +258,17 @@ indefinite release record. Record that destination in the production change.
 
 | Credential/capability | Scope | Used where |
 | --- | --- | --- |
-| `CW_DEPLOY_KEY` | Read-only deploy key for `kevinlb1/CodingWorkspace` | `codingworkspace-publication` environment secret only; delete any repository-level copy |
+| `CW_DEPLOY_KEY` | Read-only deploy key for `kevinlb1/CodingWorkspace` | `codingworkspace-publication` and reviewer-gated `codingworkspace-pr-build` environment secrets only; delete any repository-level copy |
 | AWS GitHub OIDC role `github` | ECR repository/image publication | Trusted build job only (`id-token: write`); trust exact `repo:ubc/jupyter-images:environment:codingworkspace-publication` subject, with the environment restricted to main |
 | `GITHUB_TOKEN` | `contents: write`, `actions: write` | Tracker only, to update `CW_REF` and dispatch the trusted build |
 | Public HTTPS | Read-only GizmoApp clone and fixed scanner/runtime artifacts | Trusted build |
+
+The build-only PR environment carries only the read-only `CW_DEPLOY_KEY` entry.
+The job does not request `id-token: write` or reference the AWS account secret,
+and the dedicated environment has no registry authority. Its source-key
+step invokes only helper code from reviewed `main`; candidate code first sees
+the credential-free source bundles after the key file and authenticated clones
+have been removed.
 
 The deploy-key file is created with a restrictive umask under `RUNNER_TEMP`, is
 never passed into Docker, and is removed by a shell trap. The private clone is a

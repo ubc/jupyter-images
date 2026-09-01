@@ -108,6 +108,7 @@ def main() -> int:
     # CodingWorkspace-specific lint.
     policy_paths = {
         ".github/workflows/build.yml",
+        ".github/workflows/build-pr.yml",
         ".github/workflows/track-cw.yml",
     }
     validate_codingworkspace = bool(codingworkspace_images) or any(

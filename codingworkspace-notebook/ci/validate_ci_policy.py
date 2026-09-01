@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+PR_BUILD = (ROOT / ".github/workflows/build-pr.yml").read_text(encoding="utf-8")
 TRACK = (ROOT / ".github/workflows/track-cw.yml").read_text(encoding="utf-8")
 UPDATE_OPENCODE = (ROOT / ".github/workflows/update-opencode.yml").read_text(
     encoding="utf-8"
@@ -70,6 +71,12 @@ selection_job = job(BUILD, "select-images")
 validation_job = job(BUILD, "validate-codingworkspace")
 ordinary_job = job(BUILD, "build-and-push-ordinary")
 publish_job_text = job(BUILD, "build-scan-publish")
+pr_selection = job(PR_BUILD, "select-pr-images")
+pr_ordinary = job(PR_BUILD, "build-pr-ordinary")
+pr_probe = job(PR_BUILD, "probe-pr-codingworkspace-contexts")
+trusted_pr_resolution = job(PR_BUILD, "resolve-trusted-pr")
+trusted_pr_preflight = job(PR_BUILD, "preflight-trusted-pr")
+trusted_pr_build = job(PR_BUILD, "build-trusted-pr-codingworkspace")
 candidate_request = step(BUILD, "Validate optional CodingWorkspace candidate request")
 source_resolution = step(BUILD, "Resolve exact CodingWorkspace and GizmoApp sources")
 candidate_tag = step(BUILD, "Prepare immutable image name")
@@ -92,6 +99,131 @@ if "needs: select-images" not in validation_job or (
     not in validation_job
 ):
     raise SystemExit("CodingWorkspace validation is not selected by changed paths")
+
+# Pull-request builds have two deliberately different trust tiers. Fork code
+# can build public images and exercise the exact bundle transport without any
+# secret. A complete CodingWorkspace build necessarily reveals the private
+# source to the candidate Dockerfile, so it requires an explicit main-only,
+# same-repository dispatch and protected-environment approval.
+for forbidden in (
+    "pull_request_target",
+    "workflow_run:",
+    "aws-actions/",
+    "amazon-ecr",
+    "id-token: write",
+    "docker push",
+    "--push",
+    "push: true",
+    "buildx imagetools",
+    "actions/cache",
+    "docker/login-action",
+    "cache-from",
+    "cache-to",
+    "self-hosted",
+    "secrets.AWS",
+    "actions/upload-artifact",
+):
+    if forbidden in PR_BUILD:
+        raise SystemExit(f"pull-request build workflow contains forbidden authority: {forbidden}")
+for required in (
+    "pull_request:",
+    "workflow_dispatch:",
+    "pull_request_number:",
+    "pull_request_head_sha:",
+    "permissions:\n  contents: read",
+):
+    if required not in PR_BUILD:
+        raise SystemExit(f"pull-request build workflow is missing {required}")
+for automatic_job, description in (
+    (pr_selection, "pull-request selection"),
+    (pr_ordinary, "ordinary pull-request build"),
+    (pr_probe, "CodingWorkspace context probe"),
+):
+    for forbidden in (
+        "environment:",
+        "CW_DEPLOY_KEY",
+        "secrets.",
+        "id-token",
+        "pull-requests: write",
+    ):
+        if forbidden in automatic_job:
+            raise SystemExit(f"{description} unexpectedly contains {forbidden}")
+if "github.event_name == 'pull_request'" not in pr_selection:
+    raise SystemExit("pull-request selection is not restricted to the unprivileged event")
+for required in (
+    "needs: select-pr-images",
+    "github.event_name == 'pull_request'",
+    "needs.select-pr-images.outputs.ordinary_images != '[]'",
+    "docker buildx build --load",
+    'local/pr-${IMAGE_NAME}',
+):
+    if required not in pr_ordinary:
+        raise SystemExit(f"ordinary pull-request build is missing {required}")
+for required in (
+    "needs: select-pr-images",
+    "needs.select-pr-images.outputs.validate_codingworkspace == 'true'",
+    "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f",
+    "probe_source_context_transport.sh",
+):
+    if required not in pr_probe:
+        raise SystemExit(f"CodingWorkspace pull-request context probe is missing {required}")
+for required in (
+    "github.event_name == 'workflow_dispatch'",
+    "github.repository == 'ubc/jupyter-images'",
+    "github.ref == 'refs/heads/main'",
+    "pull-requests: read",
+    'pull["head"]["repo"]["full_name"] != repository',
+    'pull["base"]["ref"] != "main"',
+    "head_sha != requested_head",
+    'fetch --no-tags origin "refs/pull/$PR_NUMBER/merge"',
+    'rev-parse "$merge_sha^1"',
+    'rev-parse "$merge_sha^2"',
+):
+    if required not in trusted_pr_resolution:
+        raise SystemExit(f"trusted PR resolution is missing {required}")
+for required in (
+    "needs: resolve-trusted-pr",
+    "persist-credentials: false",
+    "EXPECTED_MERGE_SHA",
+    "validate-static.sh",
+    "probe_source_context_transport.sh",
+):
+    if required not in trusted_pr_preflight:
+        raise SystemExit(f"trusted PR preflight is missing {required}")
+for required in (
+    "needs: [resolve-trusted-pr, preflight-trusted-pr]",
+    "environment: codingworkspace-pr-build",
+    "permissions:\n      contents: read",
+    "persist-credentials: false",
+    "read_pr_build_inputs.py",
+    'test "$candidate_cw_ref" = "$trusted_cw_ref"',
+    "secrets.CW_DEPLOY_KEY",
+    "trusted/codingworkspace-notebook/ci/prepare_git_context.py",
+    "trusted/codingworkspace-notebook/ci/prepare_git_blob_context.py",
+    "--target dependency-wheelhouse-evidence",
+    "--load",
+    "trusted/codingworkspace-notebook/ci/smoke-image.sh",
+    "candidate/codingworkspace-notebook/ci/smoke-image.sh",
+):
+    if required not in trusted_pr_build:
+        raise SystemExit(f"trusted exact PR build is missing {required}")
+if PR_BUILD.count("secrets.CW_DEPLOY_KEY") != 1:
+    raise SystemExit("the PR workflow must expose the deploy key in exactly one step")
+for forbidden in (
+    "candidate/codingworkspace-notebook/ci/prepare_git_context.py",
+    "candidate/codingworkspace-notebook/ci/prepare_git_blob_context.py",
+    "contents: write",
+    "packages: write",
+):
+    if forbidden in trusted_pr_build:
+        raise SystemExit(f"trusted exact PR build unexpectedly contains {forbidden}")
+for required in (
+    "FROM scratch AS source-context-transport",
+    "COPY --from=cwsrc /source.bundle /contexts/cw/source.bundle",
+    "COPY --from=gizmosrc /source.bundle /contexts/gizmo/source.bundle",
+):
+    if required not in DOCKERFILE:
+        raise SystemExit(f"secret-free source-context target is missing {required}")
 
 # Ordinary images retain the upstream branch/tag + short-SHA/latest contract.
 # They must not inherit CW's lint, evidence, scanning, or protected environment.
