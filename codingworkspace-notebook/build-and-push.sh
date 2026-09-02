@@ -255,18 +255,17 @@ docker push "$IMAGE"
 
 image_digest=""
 for attempt in $(seq 1 12); do
-  image_digest=$(aws ecr describe-images \
-    --repository-name "$IMAGE_NAME" \
-    --image-ids "imageTag=$IMAGE_TAG" \
-    --region "$AWS_REGION" \
-    --profile "$AWS_PROFILE" \
-    --query 'imageDetails[0].imageDigest' \
-    --output text 2>/dev/null || true)
+  manifest_json=$(docker buildx imagetools inspect \
+    "${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" \
+    --format '{{json .Manifest}}' 2>/dev/null || true)
+  image_digest=$(python3 -c \
+    'import json, sys; value = json.load(sys.stdin).get("digest", ""); print(value if isinstance(value, str) else "")' \
+    <<<"${manifest_json:-}" 2>/dev/null || true)
   [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
   sleep 5
 done
 if ! [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "ECR did not return the pushed image digest: $image_digest" >&2
+  echo "The registry did not return the pushed image digest: $image_digest" >&2
   exit 1
 fi
 printf '%s@%s\n' "${REGISTRY}/${IMAGE_NAME}" "$image_digest" \

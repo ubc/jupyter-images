@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
+PR_BUILD = (ROOT / ".github/workflows/build-pr.yml").read_text(encoding="utf-8")
 TRACK = (ROOT / ".github/workflows/track-cw.yml").read_text(encoding="utf-8")
 UPDATE_OPENCODE = (ROOT / ".github/workflows/update-opencode.yml").read_text(
     encoding="utf-8"
@@ -70,6 +71,17 @@ selection_job = job(BUILD, "select-images")
 validation_job = job(BUILD, "validate-codingworkspace")
 ordinary_job = job(BUILD, "build-and-push-ordinary")
 publish_job_text = job(BUILD, "build-scan-publish")
+legacy_aws_role = "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github"
+codingworkspace_aws_role = (
+    "arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:"
+    "role/github-codingworkspace-publication"
+)
+pr_selection = job(PR_BUILD, "select-pr-images")
+pr_ordinary = job(PR_BUILD, "build-pr-ordinary")
+pr_probe = job(PR_BUILD, "probe-pr-codingworkspace-contexts")
+trusted_pr_resolution = job(PR_BUILD, "resolve-trusted-pr")
+trusted_pr_preflight = job(PR_BUILD, "preflight-trusted-pr")
+trusted_pr_build = job(PR_BUILD, "build-trusted-pr-codingworkspace")
 candidate_request = step(BUILD, "Validate optional CodingWorkspace candidate request")
 source_resolution = step(BUILD, "Resolve exact CodingWorkspace and GizmoApp sources")
 candidate_tag = step(BUILD, "Prepare immutable image name")
@@ -92,6 +104,135 @@ if "needs: select-images" not in validation_job or (
     not in validation_job
 ):
     raise SystemExit("CodingWorkspace validation is not selected by changed paths")
+
+# Pull-request builds have two deliberately different trust tiers. Fork code
+# can build public images and exercise the exact bundle transport without any
+# secret. A complete CodingWorkspace build necessarily reveals the private
+# source to the candidate Dockerfile, so it requires an explicit main-only,
+# same-repository dispatch and protected-environment approval.
+for forbidden in (
+    "pull_request_target",
+    "workflow_run:",
+    "aws-actions/",
+    "amazon-ecr",
+    "id-token: write",
+    "docker push",
+    "--push",
+    "push: true",
+    "buildx imagetools",
+    "actions/cache",
+    "docker/login-action",
+    "cache-from",
+    "cache-to",
+    "self-hosted",
+    "secrets.AWS",
+    "actions/upload-artifact",
+):
+    if forbidden in PR_BUILD:
+        raise SystemExit(f"pull-request build workflow contains forbidden authority: {forbidden}")
+for required in (
+    "pull_request:",
+    "workflow_dispatch:",
+    "pull_request_number:",
+    "pull_request_head_sha:",
+    "permissions:\n  contents: read",
+):
+    if required not in PR_BUILD:
+        raise SystemExit(f"pull-request build workflow is missing {required}")
+for automatic_job, description in (
+    (pr_selection, "pull-request selection"),
+    (pr_ordinary, "ordinary pull-request build"),
+    (pr_probe, "CodingWorkspace context probe"),
+):
+    for forbidden in (
+        "environment:",
+        "CW_PR_BUILD_DEPLOY_KEY",
+        "secrets.",
+        "id-token",
+        "pull-requests: write",
+    ):
+        if forbidden in automatic_job:
+            raise SystemExit(f"{description} unexpectedly contains {forbidden}")
+if "github.event_name == 'pull_request'" not in pr_selection:
+    raise SystemExit("pull-request selection is not restricted to the unprivileged event")
+for required in (
+    "needs: select-pr-images",
+    "github.event_name == 'pull_request'",
+    "needs.select-pr-images.outputs.ordinary_images != '[]'",
+    "docker buildx build --load",
+    'local/pr-${IMAGE_NAME}',
+):
+    if required not in pr_ordinary:
+        raise SystemExit(f"ordinary pull-request build is missing {required}")
+for required in (
+    "needs: select-pr-images",
+    "needs.select-pr-images.outputs.validate_codingworkspace == 'true'",
+    "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f",
+    "probe_source_context_transport.sh",
+):
+    if required not in pr_probe:
+        raise SystemExit(f"CodingWorkspace pull-request context probe is missing {required}")
+for required in (
+    "github.event_name == 'workflow_dispatch'",
+    "github.repository == 'ubc/jupyter-images'",
+    "github.ref == 'refs/heads/main'",
+    "pull-requests: read",
+    'pull["head"]["repo"]["full_name"] != repository',
+    'pull["base"]["ref"] != "main"',
+    "head_sha != requested_head",
+    'fetch --no-tags origin "refs/pull/$PR_NUMBER/merge"',
+    'rev-parse "$merge_sha^1"',
+    'rev-parse "$merge_sha^2"',
+):
+    if required not in trusted_pr_resolution:
+        raise SystemExit(f"trusted PR resolution is missing {required}")
+for required in (
+    "needs: resolve-trusted-pr",
+    "persist-credentials: false",
+    "EXPECTED_MERGE_SHA",
+    "validate-static.sh",
+    "probe_source_context_transport.sh",
+):
+    if required not in trusted_pr_preflight:
+        raise SystemExit(f"trusted PR preflight is missing {required}")
+for required in (
+    "needs: [resolve-trusted-pr, preflight-trusted-pr]",
+    "environment: codingworkspace-pr-build",
+    "permissions:\n      contents: read",
+    "persist-credentials: false",
+    "read_pr_build_inputs.py",
+    'test "$candidate_cw_ref" = "$trusted_cw_ref"',
+    "CODINGWORKSPACE_PR_BUILD_POLICY_ACK",
+    "main-only-required-reviewers-no-self-review-no-admin-bypass-v1",
+    "secrets.CW_PR_BUILD_DEPLOY_KEY",
+    "trusted/codingworkspace-notebook/ci/prepare_git_context.py",
+    "trusted/codingworkspace-notebook/ci/prepare_git_blob_context.py",
+    "--target dependency-wheelhouse-evidence",
+    "--load",
+    "trusted/codingworkspace-notebook/ci/smoke-image.sh",
+    "candidate/codingworkspace-notebook/ci/smoke-image.sh",
+):
+    if required not in trusted_pr_build:
+        raise SystemExit(f"trusted exact PR build is missing {required}")
+if PR_BUILD.count("secrets.CW_PR_BUILD_DEPLOY_KEY") != 1:
+    raise SystemExit("the PR workflow must expose the deploy key in exactly one step")
+if "secrets.CW_DEPLOY_KEY" in PR_BUILD:
+    raise SystemExit("the PR workflow must use a distinct PR-build deploy-key secret")
+for forbidden in (
+    "candidate/codingworkspace-notebook/ci/prepare_git_context.py",
+    "candidate/codingworkspace-notebook/ci/prepare_git_blob_context.py",
+    "contents: write",
+    "packages: write",
+):
+    if forbidden in trusted_pr_build:
+        raise SystemExit(f"trusted exact PR build unexpectedly contains {forbidden}")
+for required in (
+    "FROM scratch AS source-context-transport",
+    "COPY --from=cwsrc /source.bundle /contexts/cw/source.bundle",
+    "COPY --from=gizmosrc /source.bundle /contexts/gizmo/source.bundle",
+):
+    if required not in DOCKERFILE:
+        raise SystemExit(f"secret-free source-context target is missing {required}")
 
 # Ordinary images retain the upstream branch/tag + short-SHA/latest contract.
 # They must not inherit CW's lint, evidence, scanning, or protected environment.
@@ -118,6 +259,8 @@ for forbidden in (
 ):
     if forbidden in ordinary_job:
         raise SystemExit(f"ordinary image publication unexpectedly contains {forbidden}")
+if legacy_aws_role not in ordinary_job or codingworkspace_aws_role in ordinary_job:
+    raise SystemExit("ordinary images must retain only the legacy AWS publication role")
 if not re.search(r'(?m)^    branches: \["\*"\]\s*$', BUILD) or not re.search(
     r'(?m)^    tags: \["\*"\]\s*$', BUILD
 ):
@@ -138,6 +281,18 @@ for required in (
         raise SystemExit(f"publish job gate is missing {required}")
 if "environment: codingworkspace-publication" not in publish_job_text:
     raise SystemExit("publication is not bound to the protected publication environment")
+if codingworkspace_aws_role not in publish_job_text or (
+    legacy_aws_role + "\n" in publish_job_text
+):
+    raise SystemExit("CodingWorkspace publication must use its environment-scoped AWS role")
+publication_policy = step(BUILD, "Verify publication environment policy acknowledgement")
+for required in (
+    "CODINGWORKSPACE_PUBLICATION_POLICY_ACK",
+    "main-only-no-admin-bypass-v1",
+    'test "$GITHUB_REF" = refs/heads/main',
+):
+    if required not in publication_policy:
+        raise SystemExit(f"publication environment policy gate is missing {required}")
 for required in (
     "needs: [select-images, validate-codingworkspace]",
     "needs.select-images.outputs.codingworkspace_images",
@@ -281,6 +436,14 @@ if not tracker_job or any(
     raise SystemExit("release tracker is not restricted to its reviewed main definition")
 if "environment: codingworkspace-publication" not in TRACK:
     raise SystemExit("release tracker is not bound to the protected publication environment")
+tracker_policy = step(TRACK, "Verify publication environment policy acknowledgement")
+for required in (
+    "CODINGWORKSPACE_PUBLICATION_POLICY_ACK",
+    "main-only-no-admin-bypass-v1",
+    'test "$GITHUB_REF" = refs/heads/main',
+):
+    if required not in tracker_policy:
+        raise SystemExit(f"tracker environment policy gate is missing {required}")
 if not re.search(
     r"(?ms)^permissions: \{\}\s*$.*?^  bump:.*?^    permissions:\s*$"
     r".*?^      contents: write\s*$.*?^      actions: write\s*$",
@@ -339,6 +502,9 @@ if any(position < 0 for position in positions) or positions != sorted(positions)
     raise SystemExit("published-digest smoke/scan/promotion steps are missing or out of order")
 if publish_job_text.count("docker buildx build") != 2:
     raise SystemExit("the trusted job must export dependency metadata then build the final image")
+prepare_image = step(BUILD, "Prepare immutable image name")
+if "aws ecr" in prepare_image:
+    raise SystemExit("hardened publication must use a pre-provisioned ECR repository")
 dependency_build = step(BUILD, "Build exact amd64 dependency layer metadata")
 for required in (
     "--platform linux/amd64",
@@ -356,6 +522,15 @@ publish_candidate = step(
 )
 if publish_candidate.count("--push") != 1 or "--platform linux/amd64" not in publish_candidate:
     raise SystemExit("the final candidate must be published exactly once for linux/amd64")
+for required in (
+    '--metadata-file "$metadata_file"',
+    '"containerimage.digest"',
+    "Buildx did not record a valid published digest",
+):
+    if required not in publish_candidate:
+        raise SystemExit(f"published candidate metadata is missing {required}")
+if "aws ecr describe-images" in publish_candidate:
+    raise SystemExit("published candidate digest must come directly from Buildx metadata")
 for required in (
     'docker pull "$ECR_REPOSITORY@$digest"',
     'docker tag "$ECR_REPOSITORY@$digest" "$LOCAL_IMAGE"',
@@ -378,6 +553,12 @@ if promotion.find('move_and_verify promotion latest "$IMAGE_DIGEST"') > promotio
     raise SystemExit("CodingWorkspace preview can move before latest is verified")
 if "record_receipt_field CODINGWORKSPACE_PREVIEW_MOVED true" not in promotion:
     raise SystemExit("workflow cannot distinguish completed preview promotion")
+if "--prefer-index=false" not in promotion:
+    raise SystemExit("promotion and rollback must preserve a source manifest digest")
+if "docker buildx imagetools inspect" not in promotion or "{{json .Manifest}}" not in promotion:
+    raise SystemExit("promotion tag read-back must use the authenticated registry path")
+if "aws ecr describe-images" in promotion:
+    raise SystemExit("promotion must not depend on ECR DescribeImages permission")
 
 evidence = step(BUILD, "Record release evidence")
 for required in (
@@ -517,6 +698,8 @@ for required in (
     "DEPENDENCY_WHEEL_INDEX_URL",
     "codingworkspace-dependency-wheelhouse-manifest.json",
     "codingworkspace-dependency-wheelhouse-identity.env",
+    "docker buildx imagetools inspect",
+    "{{json .Manifest}}",
 ):
     if required not in LOCAL_PUBLISH:
         raise SystemExit(f"local dependency build/evidence is missing {required}")

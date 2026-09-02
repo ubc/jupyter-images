@@ -1,0 +1,417 @@
+name: Build pull-request images
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Same-repository open PR number approved for an exact private-source build
+        required: true
+        type: string
+      pull_request_head_sha:
+        description: Exact full lowercase head SHA reviewed before approval
+        required: true
+        type: string
+
+# The automatic tier is fork-safe and secret-free. The exact CodingWorkspace
+# tier is manual, main-definition-only, and same-repository-only. Operators
+# must protect its dedicated environment, prevent self-review, and disallow
+# administrator bypass before acknowledging the policy gate.
+# It can read only CW_PR_BUILD_DEPLOY_KEY and deliberately receives no AWS/OIDC
+# authority or registry path.
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-images-${{ github.event.pull_request.number || inputs.pull_request_number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  reject-untrusted-dispatch:
+    name: Reject non-main trusted-build dispatch
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (github.repository != 'ubc/jupyter-images' || github.ref != 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse a privileged definition outside upstream main
+        run: |
+          echo "Exact PR builds must be dispatched from ubc/jupyter-images main." >&2
+          exit 1
+
+  select-pr-images:
+    name: Select pull-request image builds
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ordinary_images: ${{ steps.select.outputs.ordinary_images }}
+      validate_codingworkspace: ${{ steps.select.outputs.validate_codingworkspace }}
+    steps:
+      - name: Checkout pull-request merge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select changed images
+        id: select
+        env:
+          BEFORE_SHA: ${{ github.event.pull_request.base.sha }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          output_file="$RUNNER_TEMP/pr-image-selection"
+          python3 codingworkspace-notebook/ci/select_images.py \
+            --before "$BEFORE_SHA" \
+            --current "$CURRENT_SHA" \
+            --scope changed \
+            --format github-output > "$output_file"
+          cat "$output_file"
+          cat "$output_file" >> "$GITHUB_OUTPUT"
+
+  build-pr-ordinary:
+    name: Build pull-request image ${{ matrix.image }} (no push)
+    needs: select-pr-images
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.select-pr-images.outputs.ordinary_images != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.select-pr-images.outputs.ordinary_images) }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout pull-request merge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up isolated Docker Buildx builder
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build ordinary image locally
+        env:
+          IMAGE_NAME: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          docker buildx build --load \
+            -f "$IMAGE_NAME/Dockerfile" \
+            -t "local/pr-${IMAGE_NAME}:${GITHUB_SHA::7}" .
+
+  probe-pr-codingworkspace-contexts:
+    name: Probe CodingWorkspace source contexts (secret-free; not full image)
+    needs: select-pr-images
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.select-pr-images.outputs.validate_codingworkspace == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout pull-request merge history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up docker-container Buildx builder
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Export and compare bundle-only named contexts
+        run: codingworkspace-notebook/ci/probe_source_context_transport.sh
+
+  resolve-trusted-pr:
+    name: Resolve approved same-repository pull request
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'ubc/jupyter-images' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pull_request_number: ${{ steps.pr.outputs.pull_request_number }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      merge_sha: ${{ steps.merge.outputs.merge_sha }}
+    steps:
+      - name: Checkout the reviewed workflow definition
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: trusted
+
+      - name: Verify exact PR identity and trust boundary
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_PR: ${{ inputs.pull_request_number }}
+          REQUESTED_HEAD_SHA: ${{ inputs.pull_request_head_sha }}
+        run: |
+          set -euo pipefail
+          case "$REQUESTED_PR" in
+            ''|*[!0-9]*) echo "pull_request_number must be numeric" >&2; exit 1 ;;
+          esac
+          case "$REQUESTED_HEAD_SHA" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+            *) echo "pull_request_head_sha must be lowercase hexadecimal" >&2; exit 1 ;;
+          esac
+          test "${#REQUESTED_HEAD_SHA}" -eq 40
+          gh api "/repos/$GITHUB_REPOSITORY/pulls/$REQUESTED_PR" \
+            > "$RUNNER_TEMP/pull-request.json"
+          python3 - "$RUNNER_TEMP/pull-request.json" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              pull = json.load(stream)
+          repository = os.environ["GITHUB_REPOSITORY"]
+          requested_number = os.environ["REQUESTED_PR"]
+          requested_head = os.environ["REQUESTED_HEAD_SHA"]
+          if str(pull.get("number")) != requested_number or pull.get("state") != "open":
+              raise SystemExit("the requested pull request is not open")
+          if pull["base"]["repo"]["full_name"] != repository or pull["base"]["ref"] != "main":
+              raise SystemExit("the pull request must target this repository's main branch")
+          if pull["head"]["repo"]["full_name"] != repository:
+              raise SystemExit("fork pull requests cannot receive private CodingWorkspace source")
+          head_sha = pull["head"]["sha"]
+          base_sha = pull["base"]["sha"]
+          if head_sha != requested_head:
+              raise SystemExit("the pull request head changed after review")
+          if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+              raise SystemExit("the pull request base is not an exact commit")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"pull_request_number={requested_number}\n")
+              output.write(f"head_sha={head_sha}\n")
+              output.write(f"base_sha={base_sha}\n")
+          PY
+
+      - name: Pin the current synthetic merge commit
+        id: merge
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          EXPECTED_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git -C trusted fetch --no-tags origin "refs/pull/$PR_NUMBER/merge"
+          merge_sha=$(git -C trusted rev-parse --verify 'FETCH_HEAD^{commit}')
+          test "$(git -C trusted rev-list --parents -n 1 "$merge_sha" | wc -w)" -eq 3
+          test "$(git -C trusted rev-parse "$merge_sha^1")" = "$EXPECTED_BASE_SHA"
+          test "$(git -C trusted rev-parse "$merge_sha^2")" = "$EXPECTED_HEAD_SHA"
+          printf 'merge_sha=%s\n' "$merge_sha" >> "$GITHUB_OUTPUT"
+
+  preflight-trusted-pr:
+    name: Revalidate approved PR without secrets
+    needs: resolve-trusted-pr
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact approved pull-request merge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/pull/${{ needs.resolve-trusted-pr.outputs.pull_request_number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Refuse merge-ref drift
+        env:
+          EXPECTED_MERGE_SHA: ${{ needs.resolve-trusted-pr.outputs.merge_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_MERGE_SHA"
+
+      - name: Run secret-free policy and unit checks
+        run: codingworkspace-notebook/ci/validate-static.sh
+
+      - name: Set up docker-container Buildx builder
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Recheck bundle-only named-context transport
+        run: codingworkspace-notebook/ci/probe_source_context_transport.sh
+
+  build-trusted-pr-codingworkspace:
+    name: >-
+      Build exact approved PR #${{ needs.resolve-trusted-pr.outputs.pull_request_number }}
+      at ${{ needs.resolve-trusted-pr.outputs.head_sha }} (no push)
+    needs: [resolve-trusted-pr, preflight-trusted-pr]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Required reviewers must inspect the exact head SHA before approving. The
+    # environment's deployment-branch rule must continue to allow main only.
+    environment: codingworkspace-pr-build
+    permissions:
+      contents: read
+    steps:
+      - name: Verify PR-build environment policy acknowledgement
+        env:
+          PR_BUILD_POLICY_ACK: ${{ vars.CODINGWORKSPACE_PR_BUILD_POLICY_ACK }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$PR_BUILD_POLICY_ACK" = main-only-required-reviewers-no-self-review-no-admin-bypass-v1
+
+      - name: Checkout reviewed main tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: trusted
+
+      - name: Checkout exact approved pull-request merge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/pull/${{ needs.resolve-trusted-pr.outputs.pull_request_number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+          path: candidate
+
+      - name: Refuse merge-ref drift and load inert build inputs
+        env:
+          EXPECTED_MERGE_SHA: ${{ needs.resolve-trusted-pr.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$EXPECTED_MERGE_SHA"
+          inputs_file="$RUNNER_TEMP/candidate-build-inputs.env"
+          python3 trusted/codingworkspace-notebook/ci/read_pr_build_inputs.py \
+            candidate > "$inputs_file"
+          candidate_cw_ref=$(sed -n 's/^CW_REF=//p' "$inputs_file")
+          trusted_cw_ref=$(python3 \
+            trusted/codingworkspace-notebook/ci/read_pin.py \
+            trusted/codingworkspace-notebook/CW_REF)
+          test "$candidate_cw_ref" = "$trusted_cw_ref"
+          cat "$inputs_file" >> "$GITHUB_ENV"
+          printf 'LOCAL_IMAGE=local/codingworkspace-pr:%s\n' \
+            "${EXPECTED_MERGE_SHA:0:12}" >> "$GITHUB_ENV"
+
+      - name: Set up isolated Docker Buildx builder
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Resolve exact private source into credential-free contexts
+        env:
+          CW_PR_BUILD_DEPLOY_KEY: ${{ secrets.CW_PR_BUILD_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${CW_PR_BUILD_DEPLOY_KEY:-}"
+          keyfile="$RUNNER_TEMP/cw-pr-deploy-key"
+          cwsrc="$RUNNER_TEMP/cw-pr-source"
+          gizmosrc="$RUNNER_TEMP/gizmo-pr-source"
+          sourcecontexts="$RUNNER_TEMP/cw-pr-source-contexts"
+          cwcontext="$sourcecontexts/cw"
+          gizmocontext="$sourcecontexts/gizmo"
+          buildercontext="$sourcecontexts/dependency-builder"
+          known_hosts="$GITHUB_WORKSPACE/trusted/codingworkspace-notebook/ci/github_known_hosts"
+          cleanup_key() {
+            rm -f -- "$keyfile"
+          }
+          trap cleanup_key EXIT
+          umask 077
+          printf '%s\n' "$CW_PR_BUILD_DEPLOY_KEY" > "$keyfile"
+          rm -rf -- "$cwsrc" "$gizmosrc" "$sourcecontexts"
+          install -d -m 0700 "$sourcecontexts"
+
+          GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
+            git clone --quiet --no-tags git@github.com:kevinlb1/CodingWorkspace.git "$cwsrc"
+          git -C "$cwsrc" checkout --quiet --detach "$CW_REF"
+          test "$(git -C "$cwsrc" rev-parse HEAD)" = "$CW_REF"
+          test "$(git -C "$cwsrc" rev-parse --show-object-format)" = sha1
+
+          git clone --quiet --no-tags https://github.com/kevinlb1/GizmoApp.git "$gizmosrc"
+          git -C "$gizmosrc" checkout --quiet --detach "$GIZMOAPP_REF"
+          test "$(git -C "$gizmosrc" rev-parse HEAD)" = "$GIZMOAPP_REF"
+          test "$(git -C "$gizmosrc" rev-parse --show-object-format)" = sha1
+
+          python3 trusted/codingworkspace-notebook/ci/prepare_git_context.py \
+            "$cwsrc" "$CW_REF" "$cwcontext"
+          python3 trusted/codingworkspace-notebook/ci/prepare_git_context.py \
+            "$gizmosrc" "$GIZMOAPP_REF" "$gizmocontext"
+          python3 trusted/codingworkspace-notebook/ci/prepare_git_blob_context.py \
+            "$cwsrc" "$DEPENDENCY_BUILDER_REF" \
+            scripts/build_dependency_wheelhouse.py \
+            "$DEPENDENCY_BUILDER_BLOB" "$buildercontext"
+          cleanup_key
+          rm -rf -- "$cwsrc" "$gizmosrc"
+          printf 'CW_CONTEXT=%s\n' "$cwcontext" >> "$GITHUB_ENV"
+          printf 'GIZMO_CONTEXT=%s\n' "$gizmocontext" >> "$GITHUB_ENV"
+          printf 'CW_BUILDER_CONTEXT=%s\n' "$buildercontext" >> "$GITHUB_ENV"
+
+      - name: Build exact amd64 dependency metadata without publishing
+        run: |
+          set -euo pipefail
+          dependency_export="$RUNNER_TEMP/pr-dependency-export"
+          metadata_file="$RUNNER_TEMP/pr-dependency-metadata.env"
+          rm -rf -- "$dependency_export" "$metadata_file"
+          docker buildx build \
+            --platform linux/amd64 \
+            --target dependency-wheelhouse-evidence \
+            --build-context "cwsrc=$CW_CONTEXT" \
+            --build-context "gizmosrc=$GIZMO_CONTEXT" \
+            --build-context "cwbuildersrc=$CW_BUILDER_CONTEXT" \
+            --build-arg "CW_REF=$CW_REF" \
+            --build-arg "GIZMOAPP_REF=$GIZMOAPP_REF" \
+            --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
+            --build-arg "DEPENDENCY_WHEELHOUSE_LAYER_VERSION=$DEPENDENCY_WHEELHOUSE_LAYER_VERSION" \
+            --build-arg "DEPENDENCY_BUILDER_REF=$DEPENDENCY_BUILDER_REF" \
+            --build-arg "DEPENDENCY_BUILDER_BLOB=$DEPENDENCY_BUILDER_BLOB" \
+            --build-arg "DEPENDENCY_WHEEL_INDEX_URL=$DEPENDENCY_WHEEL_INDEX_URL" \
+            --output "type=local,dest=$dependency_export" \
+            -f candidate/codingworkspace-notebook/Dockerfile candidate
+          python3 trusted/codingworkspace-notebook/ci/dependency_manifest_evidence.py \
+            "$dependency_export/manifest.json" \
+            "$DEPENDENCY_WHEELHOUSE_LAYER_VERSION" \
+            --format github-env > "$metadata_file"
+          cat "$metadata_file" >> "$GITHUB_ENV"
+
+      - name: Build exact approved image locally without publishing
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --load \
+            --platform linux/amd64 \
+            --build-context "cwsrc=$CW_CONTEXT" \
+            --build-context "gizmosrc=$GIZMO_CONTEXT" \
+            --build-context "cwbuildersrc=$CW_BUILDER_CONTEXT" \
+            --build-arg "CW_REF=$CW_REF" \
+            --build-arg "GIZMOAPP_REF=$GIZMOAPP_REF" \
+            --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
+            --build-arg "DEPENDENCY_WHEELHOUSE_LAYER_VERSION=$DEPENDENCY_WHEELHOUSE_LAYER_VERSION" \
+            --build-arg "DEPENDENCY_BUILDER_REF=$DEPENDENCY_BUILDER_REF" \
+            --build-arg "DEPENDENCY_BUILDER_BLOB=$DEPENDENCY_BUILDER_BLOB" \
+            --build-arg "DEPENDENCY_WHEEL_INDEX_URL=$DEPENDENCY_WHEEL_INDEX_URL" \
+            --build-arg "DEPENDENCY_RUNTIME_ID=$DEPENDENCY_RUNTIME_ID" \
+            --build-arg "DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256=$DEPENDENCY_WHEELHOUSE_MANIFEST_SHA256" \
+            -f candidate/codingworkspace-notebook/Dockerfile \
+            -t "$LOCAL_IMAGE" candidate
+
+      - name: Smoke-test the established image contract
+        run: >-
+          trusted/codingworkspace-notebook/ci/smoke-image.sh
+          contract "$LOCAL_IMAGE" "$CW_REF" "$GIZMOAPP_REF"
+
+      - name: Smoke-test candidate contract additions
+        run: >-
+          candidate/codingworkspace-notebook/ci/smoke-image.sh
+          contract "$LOCAL_IMAGE" "$CW_REF" "$GIZMOAPP_REF"
+
+      - name: Remove private contexts and local image
+        if: always()
+        run: |
+          rm -f -- "$RUNNER_TEMP/cw-pr-deploy-key"
+          rm -rf -- "$RUNNER_TEMP/cw-pr-source" \
+            "$RUNNER_TEMP/gizmo-pr-source" \
+            "$RUNNER_TEMP/cw-pr-source-contexts"
+          docker image rm "$LOCAL_IMAGE" >/dev/null 2>&1 || true

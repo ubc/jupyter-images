@@ -2,6 +2,16 @@
 # codingworkspace-notebook: a narrow JupyterHub single-user image. Jupyter
 # Server provides Hub OAuth/activity and one authenticated named proxy only.
 ARG BASE_CONTAINER=quay.io/jupyter/base-notebook:hub-5.5.0@sha256:e6f115af0bc688b884bec4e00523512deb808972e117797608fa1bf29931714a
+
+# Fork pull requests cannot receive the private CodingWorkspace source. This
+# scratch target still exercises the production bundle-only named-context
+# transport with Buildx's docker-container driver. The PR workflow exports and
+# byte-compares both bundles; it is deliberately not a substitute for the
+# separately approved exact-image build.
+FROM scratch AS source-context-transport
+COPY --from=cwsrc /source.bundle /contexts/cw/source.bundle
+COPY --from=gizmosrc /source.bundle /contexts/gizmo/source.bundle
+
 FROM ${BASE_CONTAINER} AS codingworkspace-wheelhouse-build
 
 ARG TARGETARCH

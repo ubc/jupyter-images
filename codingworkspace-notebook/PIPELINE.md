@@ -5,17 +5,28 @@ runbook describes the trust boundary, source pins, artifacts, promotion, and
 rollback. The CodingWorkspace repository's `RELEASING.md` remains the
 developer-facing release guide.
 
-This runbook treats the Buildx bundle-context repair and the dependency
-wheelhouse as one consolidated PR14 review/deployment unit. LTIC should review,
-merge, build, and record the complete contract below together; there is no
-intermediate bundle-only image to deploy and no second wheelhouse PR to wait for.
+Merged PR14 treats the Buildx bundle-context repair and dependency wheelhouse as
+one review/deployment unit. Its one coordinated follow-up adds trust-separated
+PR build coverage, direct published-digest capture/registry read-back, and
+fail-closed environment-policy acknowledgements. There is no intermediate
+bundle-only image to deploy and no second functional-image PR to wait for.
 
 ## Trust-separated flow
 
 ```text
 fork or same-repo PR
   └─ select changed images: no secrets, no AWS, no image publication
-       └─ CodingWorkspace/workflow paths only: run CW static validation
+       ├─ ordinary images: complete local Buildx build, no push
+       └─ CodingWorkspace/workflow paths: static validation plus
+          docker-container bundle-context export/byte comparison
+          (honestly not a complete private-source image build)
+
+reviewed same-repo image PR + exact reviewed head SHA
+  └─ manual build-pr.yml dispatch from main
+       ├─ separate secret-free runner revalidates exact synthetic merge
+       └─ protected environment approval → exact local build + established
+          and candidate image-contract smokes
+          (read-only CW key only; no AWS/OIDC, push, artifact, or tag movement)
 
 reviewed jupyter-images main push touching CodingWorkspace
   └─ validate → export exact amd64 dependency identity
@@ -89,7 +100,38 @@ changing `CW_REF`, and it has no authority to move `preview` or `latest`.
 
 ## Workflow policy
 
-`build.yml` has four separated paths:
+`build.yml` retains its four release paths. `build-pr.yml` adds two build-only
+trust tiers before them:
+
+1. **Automatic fork-safe build coverage.** Selected ordinary images receive a
+   complete local Buildx build. CodingWorkspace changes exercise the candidate
+   context-preparation helper and actual Dockerfile parser with a scratch
+   `source-context-transport` target, using bundle-only public fixtures through
+   the same `docker-container` driver as CI. The exported bundles are compared
+   byte-for-byte. No automatic PR job references a secret, environment, AWS
+   action, OIDC permission, registry, cache, or artifact.
+2. **Explicit exact CodingWorkspace PR build.** A maintainer dispatches the
+   reviewed `main` workflow with one open same-repository PR number and the full
+   head SHA just reviewed. The resolver rejects forks, non-main bases, stale
+   heads, non-main workflow definitions, and synthetic-merge drift. A separate
+   secret-free runner repeats static and context checks. Only then can required
+   reviewers approve the dedicated `codingworkspace-pr-build` environment job
+   after its main-only/reviewer policy acknowledgement passes. It
+   converts the pinned private clone to credential-free contexts, deletes the
+   key and clone, builds and loads the candidate locally, and runs both the
+   established trusted image contract and any candidate contract additions.
+   The job has `contents: read` only and contains no publish,
+   promotion, tag-movement, evidence-upload, or AWS path.
+
+The exact tier cannot safely run automatically for arbitrary fork code.
+Providing the private source context to a candidate Dockerfile necessarily
+lets that Dockerfile read it and potentially transmit it. Neither withheld
+secrets nor an ephemeral runner changes that fact. A fork contribution must be
+mirrored onto a reviewed same-repository branch before explicit approval. The
+workflow intentionally avoids both `pull_request_target` and privileged
+`workflow_run` checkout patterns.
+
+The release paths remain:
 
 1. **Non-secret selection.** Runs for every PR, branch/tag push, and dispatch
    with only `contents: read`. It determines the changed image directories and
@@ -141,23 +183,48 @@ start a push workflow.
 dispatch. Branch protection on `main` and required validation remain an
 administrator setting outside this repository.
 
-Both CodingWorkspace credential-bearing jobs name the
-`codingworkspace-publication` GitHub environment. Configure that environment to
-allow deployments only from `main`, move `CW_DEPLOY_KEY` into it, and delete
-every repository-level copy. The AWS role trust policy must independently
-require the exact OIDC subject
-`repo:ubc/jupyter-images:environment:codingworkspace-publication` and intended
-audience. GitHub environment jobs use the environment rather than the ref in
+Publication and tracking jobs name the `codingworkspace-publication` GitHub
+environment. Configure it to allow deployments only from `main`, move
+`CW_DEPLOY_KEY` into it, delete every repository-level copy, and disallow
+administrator bypass. Only after those rules are active, set the environment
+variable `CODINGWORKSPACE_PUBLICATION_POLICY_ACK=main-only-no-admin-bypass-v1`.
+Configure a separate
+`codingworkspace-pr-build` environment in this order: create it, restrict it to
+`main`, add required reviewers, enable **Prevent self-review**, disallow
+administrator bypass, set
+`CODINGWORKSPACE_PR_BUILD_POLICY_ACK=main-only-required-reviewers-no-self-review-no-admin-bypass-v1`,
+and then add a distinct read-only `CW_PR_BUILD_DEPLOY_KEY` environment secret.
+It must have no AWS secret or variable, and neither deploy-key secret may exist
+at repository scope. The acknowledgement variables fail closed when absent;
+they do not replace an administrator receipt proving the GitHub protection
+settings.
+The dedicated `github-codingworkspace-publication` AWS role trust policy must
+independently require the exact OIDC subject
+`repo:ubc/jupyter-images:environment:codingworkspace-publication` and the exact
+audience `sts.amazonaws.com`. Retain the existing `codingworkspace-notebook`
+ECR repository, to which the accepted PR14 follow-up already pushed. Grant
+`ecr:GetAuthorizationToken` on `*`; on only that repository
+ARN, grant `ecr:BatchCheckLayerAvailability`, `ecr:BatchGetImage`,
+`ecr:GetDownloadUrlForLayer`, `ecr:InitiateLayerUpload`,
+`ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, and `ecr:PutImage`.
+`ecr:DescribeImages`, repository discovery/creation, and deletion are not
+required. GitHub environment jobs use the environment rather than the ref in
 `sub`; the environment's deployment-branch rule is therefore what binds the
 role to main. These are release prerequisites: a contributor can edit an `if`
 condition in branch YAML.
+
+The legacy `github` role cannot safely be reused: binding it to the
+CodingWorkspace environment would break ordinary branch/tag image publication,
+while leaving it broad and adding CodingWorkspace permissions would let
+branch-editable ordinary workflows reach the hardened repository. Keep the two
+roles disjoint.
 
 ## Immutable source resolution
 
 | Input | Resolution and verification |
 | --- | --- |
 | jupyter-images | The checked-out full `GITHUB_SHA` on reviewed `main` |
-| CodingWorkspace | Normally the tracker-owned lowercase 40-character SHA in `CW_REF`, which on `jupyter-images` main equals the CodingWorkspace `release` head. An explicit main-only manual candidate may instead select a different full lowercase SHA without editing `CW_REF`; it is non-promoting and must be reachable from the fresh private clone's `origin/main`. In both cases the private clone uses `CW_DEPLOY_KEY`, the selected object must be that exact SHA-1 commit, and detached checkout must equal it. |
+| CodingWorkspace | Normally the tracker-owned lowercase 40-character SHA in `CW_REF`, which on `jupyter-images` main equals the CodingWorkspace `release` head. An explicit main-only manual candidate may instead select a different full lowercase SHA without editing `CW_REF`; it is non-promoting and must be reachable from the fresh private clone's `origin/main`. Publication uses the environment-scoped `CW_DEPLOY_KEY`; an exact approved PR build uses the separately scoped `CW_PR_BUILD_DEPLOY_KEY`. In both paths the selected object must be that exact SHA-1 commit and detached checkout must equal it. |
 | GizmoApp | Exactly one lowercase 40-character SHA in `GIZMOAPP_REF`; credential-free public clone; detached checkout must equal that SHA and use SHA-1 object format |
 | Dependency builder | `DEPENDENCY_LAYER.env` pins private CodingWorkspace commit `83d4956dc2d091309daaf7be32c350c96d8b2aa2` and builder blob `7a30db859d3451293f9193b75175801b7ed49ec5`; the workflow extracts only that blob from the already authenticated full clone and re-hashes it inside BuildKit |
 | Base image | Version tag plus `sha256` digest in `Dockerfile` |
@@ -217,9 +284,19 @@ indefinite release record. Record that destination in the production change.
 | Credential/capability | Scope | Used where |
 | --- | --- | --- |
 | `CW_DEPLOY_KEY` | Read-only deploy key for `kevinlb1/CodingWorkspace` | `codingworkspace-publication` environment secret only; delete any repository-level copy |
-| AWS GitHub OIDC role `github` | ECR repository/image publication | Trusted build job only (`id-token: write`); trust exact `repo:ubc/jupyter-images:environment:codingworkspace-publication` subject, with the environment restricted to main |
+| `CW_PR_BUILD_DEPLOY_KEY` | Distinct read-only deploy key for exact approved PR builds | Reviewer-gated `codingworkspace-pr-build` environment secret only; never store at repository scope |
+| AWS GitHub OIDC role `github-codingworkspace-publication` | Global ECR login plus read/push/tag registry actions on only `codingworkspace-notebook`; no describe, create, or delete | Hardened environment job only (`id-token: write`); trust the exact publication-environment subject and `sts.amazonaws.com` audience; restrict the environment to main with no administrator bypass |
+| Legacy AWS GitHub OIDC role `github` | Ordinary-image ECR publication | Existing ordinary branch/tag job only; never grant CodingWorkspace repository publication through this role |
 | `GITHUB_TOKEN` | `contents: write`, `actions: write` | Tracker only, to update `CW_REF` and dispatch the trusted build |
 | Public HTTPS | Read-only GizmoApp clone and fixed scanner/runtime artifacts | Trusted build |
+
+The build-only PR environment carries only the read-only
+`CW_PR_BUILD_DEPLOY_KEY` secret and its non-secret policy acknowledgement.
+The job does not request `id-token: write` or reference the AWS account secret,
+and the dedicated environment has no registry authority. Its source-key
+step invokes only helper code from reviewed `main`; candidate code first sees
+the credential-free source bundles after the key file and authenticated clones
+have been removed.
 
 The deploy-key file is created with a restrictive umask under `RUNNER_TEMP`, is
 never passed into Docker, and is removed by a shell trap. The private clone is a
@@ -413,10 +490,10 @@ bound age. Restarting Jupyter does not reset the claimed credential age.
 
 1. Land the CodingWorkspace changes on `main`; keep its `release` branch at the
    current accepted revision. Do not change `CW_REF` in the image PR.
-2. Merge the consolidated PR14 image change. Confirm non-secret validation and
-   any trusted immutable candidate build pass. That candidate uses the current
-   `release` pin; confirm
-   `preview` and CodingWorkspace `latest` did not move.
+2. Use merged PR14 and merge its one coordinated build-validation/digest-
+   readback follow-up after the environment and role prerequisites are recorded.
+   Rerun the trusted immutable baseline candidate using the current `release`
+   pin; confirm `preview` and CodingWorkspace `latest` did not move.
 3. Advance CodingWorkspace `release` to the approved source commit. Within 15
    minutes `track-cw.yml` updates `CW_REF` and dispatches the one promotion
    build. A manual tracker run avoids the wait.
