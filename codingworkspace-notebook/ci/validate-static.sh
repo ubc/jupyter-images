@@ -41,8 +41,10 @@ reject_ere_matches() {
 CW_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/CW_REF)
 GIZMOAPP_REF=$(python3 codingworkspace-notebook/ci/read_pin.py codingworkspace-notebook/GIZMOAPP_REF)
 printf 'Validated full source pins: CW=%s GizmoApp=%s\n' "$CW_REF" "$GIZMOAPP_REF"
-test "$CW_REF" = 3f7d93d4d1fc72c809c24df4757ecc91cdf4b415 \
-  || fail "the image-source integration must retain the accepted CodingWorkspace release pin"
+# CW_REF is tracker-owned: track-cw.yml moves it to the CodingWorkspace
+# release head and then dispatches build.yml, so its value cannot be asserted
+# here. read_pin.py already rejects anything but one full lowercase SHA, and
+# build-pr.yml separately refuses a pull request that changes the pin.
 test "$GIZMOAPP_REF" = 2d9cad4af9decfe5336306f0e4afc529082a37fb \
   || fail "the wheelhouse image must use the reviewed offline-installer GizmoApp commit"
 . codingworkspace-notebook/DEPENDENCY_LAYER.env
