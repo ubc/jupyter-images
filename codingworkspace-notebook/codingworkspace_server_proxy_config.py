@@ -151,17 +151,18 @@ cw_env = {
     "PYTHONNOUSERSITE": "1",
     "PYTHONSAFEPATH": "1",
     "CODINGWORKSPACE_ADMIN_USERS": os.environ.get("CODINGWORKSPACE_ADMIN_USERS", ""),
-    # The pod is the isolation boundary in the JupyterHub topology, so the
-    # platform runs its children in "logical" mode.
-    #
-    # This previously said "bubblewrap", with two companion settings. That is
-    # not a value CodingWorkspace accepts: config.py allows only "logical" or
-    # "linux-user" and raises otherwise, so the control server exited on every
-    # start, jupyter-server-proxy retried for 150s, and the browser saw a 504.
-    # CODINGWORKSPACE_BUBBLEWRAP_COMMAND and _RUNTIME_ROOTS are read nowhere in
-    # CodingWorkspace and are dropped with it. Bubblewrap stays installed in the
-    # image; reintroduce these only alongside code that reads them.
-    "CODINGWORKSPACE_ISOLATION_MODE": "logical",
+    # CodingWorkspace releases after 3f7d93d4 require Bubblewrap in JupyterHub
+    # mode and refuse to start otherwise (CW-JH-STARTUP-001). Student apps,
+    # installers, validation, and agents run in fresh mount/PID/user
+    # namespaces with the image read-only and the pod's private roots masked.
+    # A stock KubeSpawner pod cannot mount a fresh procfs from an unprivileged
+    # user namespace because kubelet masks /proc/kcore and similar paths, so
+    # PROC_MODE=auto lets CodingWorkspace bind the pod's existing /proc and
+    # report `procfs: host-bound` in /readyz instead of failing closed.
+    "CODINGWORKSPACE_ISOLATION_MODE": "bubblewrap",
+    "CODINGWORKSPACE_BUBBLEWRAP_COMMAND": "/usr/bin/bwrap",
+    "CODINGWORKSPACE_BUBBLEWRAP_PROC_MODE": "auto",
+    "CODINGWORKSPACE_BUBBLEWRAP_RUNTIME_ROOTS": "/usr:/opt",
     "CODINGWORKSPACE_AGENT_BACKEND": "opencode",
     "CODINGWORKSPACE_OPENCODE_COMMAND": "/usr/local/bin/opencode",
     "CODINGWORKSPACE_ISOLATION_OPENCODE_COMMAND": "/usr/local/bin/opencode",
