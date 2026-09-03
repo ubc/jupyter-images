@@ -56,6 +56,39 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # CW_REF is tracker-owned. track-cw.yml follows the CodingWorkspace
+      # `release` head and pushes the bump straight to main, never through a
+      # pull request, so refusing a PR-borne change here cannot block a
+      # release. This replaces the hardcoded-SHA assertion removed in #19,
+      # which could not survive the tracker moving the pin: scoping the check
+      # to base-vs-head keeps the guarantee without a value that goes stale.
+      - name: Refuse a pull-request change to the tracker-owned CW_REF
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          pin=codingworkspace-notebook/CW_REF
+          base_file="$RUNNER_TEMP/base-cw-ref"
+          if ! git cat-file -e "$BASE_SHA:$pin" 2>/dev/null; then
+            echo "$pin is missing from the base commit; refusing to guess." >&2
+            exit 1
+          fi
+          git show "$BASE_SHA:$pin" > "$base_file"
+          base_ref=$(python3 codingworkspace-notebook/ci/read_pin.py "$base_file")
+          head_ref=$(python3 codingworkspace-notebook/ci/read_pin.py "$pin")
+          if [ "$base_ref" != "$head_ref" ]; then
+            echo "This pull request changes $pin:" >&2
+            echo "  base: $base_ref" >&2
+            echo "  head: $head_ref" >&2
+            echo "That pin is owned by track-cw.yml, which follows the" >&2
+            echo "CodingWorkspace release head. Release by advancing" >&2
+            echo "CodingWorkspace 'release'; the tracker then bumps the pin on" >&2
+            echo "main and dispatches the promoting build. Do not carry a pin" >&2
+            echo "change in an image-source pull request." >&2
+            exit 1
+          fi
+          printf 'CW_REF unchanged from base (%s).\n' "$head_ref"
+
       - name: Select changed images
         id: select
         env:
