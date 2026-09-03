@@ -1,0 +1,7 @@
+# Python bytecode. Two .pyc files were committed in #21 (cpython-312 bytecode,
+# while the image runs Python 3.13) after a local `py_compile` was swept up by
+# `git add -A`. They never reached the image — the Dockerfile copies named
+# source files — but they do not belong in the tree.
+__pycache__/
+*.py[cod]
+*$py.class
