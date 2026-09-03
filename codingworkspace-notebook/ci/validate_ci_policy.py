@@ -24,6 +24,9 @@ DOCKERFILE = (ROOT / "codingworkspace-notebook/Dockerfile").read_text(encoding="
 VERIFY_CANDIDATE = (
     ROOT / "codingworkspace-notebook/ci/verify_cw_candidate.py"
 ).read_text(encoding="utf-8")
+VALIDATE_STATIC = (ROOT / "codingworkspace-notebook/ci/validate-static.sh").read_text(
+    encoding="utf-8"
+)
 
 EXPECTED_ACTIONS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -155,6 +158,28 @@ for automatic_job, description in (
             raise SystemExit(f"{description} unexpectedly contains {forbidden}")
 if "github.event_name == 'pull_request'" not in pr_selection:
     raise SystemExit("pull-request selection is not restricted to the unprivileged event")
+
+# CW_REF is tracker-owned. The tracker pushes to main directly, so this guard
+# constrains pull requests only and cannot block a release. It replaces the
+# hardcoded-SHA assertion removed in #19, which broke the first real release
+# because the tracker's own bump could never satisfy it. Pin the base-vs-head
+# shape here so a future change cannot quietly drop the check or reintroduce a
+# constant that goes stale the moment `release` advances.
+pr_pin_guard = step(PR_BUILD, "Refuse a pull-request change to the tracker-owned CW_REF")
+for required in (
+    "BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+    'git show "$BASE_SHA:$pin"',
+    "read_pin.py",
+    'if [ "$base_ref" != "$head_ref" ]; then',
+    "exit 1",
+):
+    if required not in pr_pin_guard:
+        raise SystemExit(f"the pull-request CW_REF guard is missing {required}")
+if re.search(r"(?m)^\s*test\s+\"\$CW_REF\"\s*=\s*[0-9a-f]{40}", VALIDATE_STATIC):
+    raise SystemExit(
+        "validate-static.sh must not assert a constant CW_REF; the tracker owns that pin "
+        "and a hardcoded value cannot survive a release (see #19)"
+    )
 for required in (
     "needs: select-pr-images",
     "github.event_name == 'pull_request'",
