@@ -255,6 +255,50 @@ PY
         trap - EXIT
       )
       rm -rf -- "$offline_env"
+      # Load CodingWorkspace settings under exactly the environment the image
+      # injects through its Jupyter config. The application validates that
+      # environment at startup and serves CW-JH-STARTUP-001 when it disagrees
+      # with the image (the ac2622f3 rollout failed this way while the older
+      # contract smoke stayed green), so the disagreement must fail here.
+      JUPYTERHUB_SERVICE_PREFIX=/user/smoke/ \
+      CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS=120 \
+      python - <<"PY"
+import os
+import sys
+
+sys.path.insert(0, "/opt/codingworkspace-jupyter/runtime")
+
+
+class _Config:
+    """Accept every traitlets-style assignment the Jupyter config makes."""
+
+    def __getattr__(self, name):
+        value = _Config()
+        setattr(self, name, value)
+        return value
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+
+config_path = "/opt/codingworkspace-jupyter/config/jupyter_server_config.py"
+namespace = {"c": _Config(), "__name__": "jupyter_server_config", "__file__": config_path}
+with open(config_path, encoding="utf-8") as handle:
+    exec(compile(handle.read(), config_path, "exec"), namespace)
+cw_env = dict(namespace["cw_env"])
+assert cw_env["CODINGWORKSPACE_AUTH_MODE"] == "jupyterhub", cw_env
+assert cw_env["CODINGWORKSPACE_ISOLATION_MODE"] == "bubblewrap", cw_env["CODINGWORKSPACE_ISOLATION_MODE"]
+os.environ.update(cw_env)
+
+from codingworkspace.config import load_settings
+from codingworkspace.bubblewrap import bubblewrap_executable
+
+settings = load_settings()
+assert settings.auth_mode == "jupyterhub"
+assert settings.isolation_mode == "bubblewrap"
+assert bubblewrap_executable(settings) == "/usr/bin/bwrap", settings.bubblewrap_command
+print("CodingWorkspace accepts the image-injected JupyterHub environment")
+PY
       test ! -e /etc/opencode/opencode.json
       test -z "${OPENCODE_CONFIG:-}"
       test "${JUPYTERHUB_SINGLEUSER_APP:-}" = "jupyter_server.serverapp.ServerApp"
