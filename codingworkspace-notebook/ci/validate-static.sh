@@ -233,7 +233,9 @@ for required in \
   'load_shutdown_budget()' \
   'PRESTOP_CHECKPOINT_INTEGRITY_RESERVE_SECONDS' \
   'os.pidfd_open' \
-  'signal.pidfd_send_signal(pid_descriptor, signal.SIGTERM)' \
+  'SYS_PIDFD_OPEN = 434' \
+  'SYS_PIDFD_SEND_SIGNAL = 424' \
+  'pidfd_send_signal(pid_descriptor, signal.SIGTERM)' \
   'status=not-running' \
   'find_raw_matches(expected_uid, deadline)' \
   'prestop_target_ambiguous' \

@@ -9,7 +9,10 @@ ordinary termination policy take over.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
+import platform
 import re
 import select
 import signal
@@ -56,6 +59,14 @@ PRIMARY_QUICK_CHECK_MIN_SECONDS = 2.0
 PRIMARY_QUICK_CHECK_MAX_SECONDS = 5.0
 PRIMARY_QUICK_CHECK_RETURN_RESERVE_SECONDS = 1.0
 MAX_PROC_FILE_BYTES = 1024 * 1024
+# pidfd_open(2) and pidfd_send_signal(2) use the same numbers on every Linux
+# architecture that gained them (they postdate the unified syscall table). The
+# image's conda CPython is built without HAVE_PIDFD_OPEN, so os.pidfd_open and
+# signal.pidfd_send_signal are absent there although the 6.x kernel supports
+# both; the hook then goes through libc's syscall() with these numbers.
+SYS_PIDFD_SEND_SIGNAL = 424
+SYS_PIDFD_OPEN = 434
+PIDFD_SYSCALL_ARCHITECTURES = frozenset({"x86_64", "aarch64"})
 SHUTDOWN_CHECKPOINT_RE = re.compile(
     r"^[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-shutdown-[0-9a-f]{8}\.sqlite3$"
 )
@@ -151,6 +162,41 @@ def deadline_signal_handler(_signum: int, _frame: object) -> None:
     raise PreStopFailure("prestop_hook_deadline_exceeded")
 
 
+def _raw_syscall(number: int, *arguments: int) -> int:
+    if platform.machine() not in PIDFD_SYSCALL_ARCHITECTURES:
+        raise PreStopFailure("prestop_pidfd_unavailable")
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    result = int(
+        libc.syscall(
+            ctypes.c_long(number), *(ctypes.c_long(int(value)) for value in arguments)
+        )
+    )
+    if result < 0:
+        error_number = ctypes.get_errno()
+        if error_number == errno.ENOSYS:
+            raise PreStopFailure("prestop_pidfd_unavailable")
+        raise OSError(error_number, os.strerror(error_number))
+    return result
+
+
+def pidfd_open(pid: int) -> int:
+    """Return a pidfd for ``pid``, using the interpreter wrapper when it exists."""
+
+    if hasattr(os, "pidfd_open"):
+        return os.pidfd_open(pid, 0)
+    return _raw_syscall(SYS_PIDFD_OPEN, pid, 0)
+
+
+def pidfd_send_signal(descriptor: int, signum: int) -> None:
+    """Signal the process behind ``descriptor``; PID reuse cannot redirect it."""
+
+    if hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(descriptor, signum)
+        return
+    _raw_syscall(SYS_PIDFD_SEND_SIGNAL, descriptor, int(signum), 0, 0)
+
+
 def read_proc_file(path: str) -> bytes:
     descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
@@ -225,17 +271,18 @@ def exact_budget_environment(
 
 
 def raw_process_match(pid: int, expected_uid: int) -> bool:
-    """Match the managed child using only files a non-dumpable process exposes.
+    """Narrow the /proc scan to processes with the managed child's exact argv.
 
     CodingWorkspace makes itself non-dumpable (``PR_SET_DUMPABLE=0``) before it
     starts any student process, so that same-UID student code cannot read its
-    credentials. Linux then owns ``/proc/<pid>`` by root and refuses same-UID
-    access to ``exe``, ``cwd``, ``environ``, ``fd``, and ``maps``; only
-    ``cmdline``, ``stat``, and ``status`` stay readable. An earlier version of
-    this helper checked ``exe`` here, which made every real pod look as if
-    CodingWorkspace were not running, so the hook returned ``not-running``
-    and Jupyter's own SIGTERM exit ended the container before the shutdown
-    checkpoint could be written.
+    credentials. Linux then refuses same-UID access to its ``exe``, ``cwd``,
+    ``environ``, ``fd``, and ``maps``; ``cmdline``, ``stat``, and ``status``
+    stay readable. An earlier version of this helper checked ``exe`` here,
+    which made every real pod look as if CodingWorkspace were not running.
+
+    This is a pre-filter, not the identity proof: ``cmdline`` is writable by
+    any same-UID process. ``identify_candidate`` supplies the proof through the
+    parent binding.
     """
 
     try:
@@ -252,12 +299,14 @@ def identify_candidate(
 ) -> Candidate | None:
     """Bind the exact-argv child to the Jupyter parent that must have started it.
 
-    The child's own ``cwd``, ``exe``, and ``environ`` are unreadable once it is
-    non-dumpable, so the environment, working directory, and grace-period
-    assertions are made against the parent instead. jupyter-server-proxy is the
-    only process that launches this argv in the pod, the parent stays dumpable,
+    The parent binding is the identity boundary. The child's own ``cwd``,
+    ``exe``, and ``environ`` are unreadable once it is non-dumpable and its
+    ``cmdline`` is forgeable, so the environment, working directory, and
+    grace-period assertions are made against the parent: jupyter-server-proxy
+    is the only process that launches this argv in the pod, it stays dumpable,
     and its environment carries the Hub-injected grace value from which the
-    child's shutdown budget is derived.
+    child's shutdown budget is derived. A student process that forges the argv
+    has a bubblewrap wrapper as its parent and cannot satisfy that binding.
     """
 
     try:
@@ -531,9 +580,10 @@ def run_prestop(deadline: float, budget: ShutdownBudget) -> int:
     if candidate is None:
         raise PreStopFailure("prestop_target_changed")
 
-    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
-        raise PreStopFailure("prestop_pidfd_unavailable")
-    pid_descriptor = os.pidfd_open(candidate.pid, 0)
+    # pidfd_open raises prestop_pidfd_unavailable itself when neither the
+    # interpreter wrapper nor the raw syscall is usable; there is no os.kill
+    # fallback because a recycled PID could redirect the signal.
+    pid_descriptor = pidfd_open(candidate.pid)
     try:
         # Close the scan/open race before signalling. A pidfd prevents later PID
         # reuse from redirecting the signal to an unrelated same-UID process.
@@ -544,7 +594,7 @@ def run_prestop(deadline: float, budget: ShutdownBudget) -> int:
         if rescanned_matches != [candidate.pid] or verified != candidate:
             raise PreStopFailure("prestop_target_changed")
         checkpoints_before = snapshot_shutdown_checkpoints(expected_uid, deadline)
-        signal.pidfd_send_signal(pid_descriptor, signal.SIGTERM)
+        pidfd_send_signal(pid_descriptor, signal.SIGTERM)
 
         poller = select.poll()
         poller.register(pid_descriptor, select.POLLIN)
