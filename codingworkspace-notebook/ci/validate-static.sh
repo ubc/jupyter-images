@@ -338,6 +338,9 @@ for required in \
   X-CodingWorkspace-Proxy-Token \
   CODINGWORKSPACE_PROXY_AUTH_TOKEN \
   CODINGWORKSPACE_ISOLATION_MODE \
+  'PREVIEW_CAPABILITY_ROUTE = r"(workspaces/[^/]+/preview/cap-[0-9a-f]{32}(?:/.*)?)"' \
+  'allow_unauthenticated(getattr(proxy_class, verb))' \
+  'make_preview_proxy_handler(proxy_class)' \
   '"CODINGWORKSPACE_ISOLATION_MODE": "bubblewrap"' \
   '"CODINGWORKSPACE_BUBBLEWRAP_COMMAND": "/usr/bin/bwrap"' \
   '"CODINGWORKSPACE_BUBBLEWRAP_PROC_MODE": "auto"' \

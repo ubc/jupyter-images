@@ -9,11 +9,22 @@ import time
 from typing import Any
 
 from jupyter_server.auth import Authorizer
+from jupyter_server.auth.decorator import allow_unauthenticated
+from jupyter_server.utils import url_path_join
 from jupyter_server_proxy.config import ServerProxy as ServerProxyConfig
-from jupyter_server_proxy.config import make_handlers
+from jupyter_server_proxy.handlers import AddSlashHandler, ProxyHandler
 
 
 TERMINATION_GRACE_ENV = "CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS"
+# Student previews render in an opaque-origin sandboxed iframe. Requests that
+# page makes in CORS mode (ES module scripts, fetch(), XMLHttpRequest) omit
+# cookies, so the Hub-authenticated proxy handler would answer them with a login
+# redirect and the app could render but never reach its own API. CodingWorkspace
+# therefore publishes each running preview under a per-start random capability
+# path, which Jupyter serves without cookie authentication; CodingWorkspace
+# authorizes those requests by matching the capability it minted. The route
+# matches only that exact shape, so nothing else on the server is exposed.
+PREVIEW_CAPABILITY_ROUTE = r"(workspaces/[^/]+/preview/cap-[0-9a-f]{32}(?:/.*)?)"
 # The kubelet starts the termination grace-period clock before it invokes an
 # exec preStop hook. Keep these budgets in one trusted runtime module so the
 # Jupyter child timeout is derived from, rather than independent of, the Hub
@@ -104,6 +115,34 @@ class CodingWorkspaceOnlyAuthorizer(Authorizer):
     ) -> bool:
         del handler, user
         return (str(action), str(resource)) in self._allowed
+
+
+def make_preview_proxy_handler(proxy_class: type) -> type:
+    """Derive the cookie-free preview handler from the configured named proxy.
+
+    The subclass shares the supervised process ``state`` with the main handler
+    (so exactly one CodingWorkspace process exists) and inherits the per-server
+    ``request_headers_override`` that stamps ``X-CodingWorkspace-Proxy-Token``,
+    so CodingWorkspace can still tell the request arrived through Jupyter. It
+    skips only ``ProxyHandler.prepare``'s ``web.authenticated`` demand; the
+    ordinary ``JupyterHandler.prepare`` bookkeeping still runs, and every HTTP
+    verb is marked ``@allow_unauthenticated`` so the change stays correct if
+    ``ServerApp.allow_unauthenticated_access`` is ever turned off.
+    """
+
+    class CodingWorkspacePreviewProxy(proxy_class):  # type: ignore[misc,valid-type]
+        async def prepare(self, *args: Any, **kwargs: Any) -> None:
+            prepared = super(ProxyHandler, self).prepare(*args, **kwargs)
+            if prepared is not None:
+                await prepared
+
+    for verb in ("get", "post", "put", "delete", "head", "patch", "options"):
+        setattr(
+            CodingWorkspacePreviewProxy,
+            verb,
+            allow_unauthenticated(getattr(proxy_class, verb)),
+        )
+    return CodingWorkspacePreviewProxy
 
 
 def _load_jupyter_server_extension(server_app: Any) -> None:
@@ -226,10 +265,27 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
             "The model credential issue time must be 0 or a plausible operator-supplied epoch"
         )
 
-    handlers = make_handlers(server_app.web_app.settings["base_url"], [process])
+    base_url = server_app.web_app.settings["base_url"]
+    proxy_class, proxy_kwargs = process.make_proxy_handler()
+    if proxy_class is None:
+        raise RuntimeError("The CodingWorkspace named proxy did not produce a handler")
+    # Both handlers must receive the same kwargs object: it carries the
+    # supervised process state, and a second copy would start a second
+    # CodingWorkspace on the same port. The capability route is listed first so
+    # tornado matches it before the general, Hub-authenticated route.
+    handlers = [
+        (
+            url_path_join(base_url, process.name, PREVIEW_CAPABILITY_ROUTE),
+            make_preview_proxy_handler(proxy_class),
+            proxy_kwargs,
+        ),
+        (url_path_join(base_url, process.name, r"(.*)"), proxy_class, proxy_kwargs),
+        (url_path_join(base_url, process.name), AddSlashHandler),
+    ]
     server_app.web_app.add_handlers(".*", handlers)
     server_app.log.info(
-        "[codingworkspace] Named proxy enabled; arbitrary port proxying disabled"
+        "[codingworkspace] Named proxy enabled with the cookie-free preview "
+        "capability route; arbitrary port proxying disabled"
     )
 
 

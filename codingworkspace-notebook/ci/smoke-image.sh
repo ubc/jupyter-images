@@ -79,6 +79,22 @@ assert dependency_environment["CODINGWORKSPACE_DEPENDENCY_RUNTIME_ID"].startswit
 assert parse_termination_grace_seconds("120") == 120
 assert derive_codingworkspace_shutdown_seconds(120) == 90
 assert derive_codingworkspace_shutdown_seconds(100) == 73
+
+# The preview capability route must be served without the Hub cookie, and it
+# must match only the exact capability shape so nothing else is exposed.
+import re as _re
+from codingworkspace_jupyter_runtime import PREVIEW_CAPABILITY_ROUTE, make_preview_proxy_handler
+from jupyter_server_proxy.handlers import SuperviseAndProxyHandler
+preview_handler = make_preview_proxy_handler(SuperviseAndProxyHandler)
+for verb in ("get", "post", "put", "delete", "head", "patch", "options"):
+    assert getattr(getattr(preview_handler, verb), "__allow_unauthenticated", False), verb
+assert preview_handler.prepare is not SuperviseAndProxyHandler.prepare
+route = _re.compile("^" + PREVIEW_CAPABILITY_ROUTE + "$")
+assert route.match("workspaces/ws-1/preview/cap-" + "0" * 32 + "/api/chat")
+assert route.match("workspaces/ws-1/preview/cap-" + "0" * 32)
+assert not route.match("workspaces/ws-1/preview/")
+assert not route.match("workspaces/ws-1/preview/cap-" + "0" * 31 + "/")
+assert not route.match("api/workspaces")
 for invalid in (None, "", "56", "0120", "120 ", "120.0", "3601"):
     try:
         parse_termination_grace_seconds(invalid)
@@ -295,6 +311,11 @@ try:
             assert result == 0, output.getvalue()
             assert "CW_PRESTOP v=1 status=ok" in output.getvalue(), output.getvalue()
             assert "checkpoint_quick_check=ok" in output.getvalue(), output.getvalue()
+            assert "restarted=none" in output.getvalue(), output.getvalue()
+            # The outcome also lands on the retained volume for post-mortems.
+            recorded = (run_dir / "prestop.log").read_text(encoding="utf-8")
+            assert "CW_PRESTOP v=1 status=ok" in recorded, recorded
+            assert (run_dir / "prestop.log").stat().st_mode & 0o077 == 0
             checkpoints = sorted(
                 name for name in os.listdir(backup_dir)
                 if prestop.SHUTDOWN_CHECKPOINT_RE.fullmatch(name)
