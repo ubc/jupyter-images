@@ -29,24 +29,12 @@ EXPECTED_COMMAND = (
     "serve",
 )
 EXPECTED_CWD = "/opt/codingworkspace-jupyter/empty-root"
-EXPECTED_PYTHON = "/opt/conda/bin/python"
 EXPECTED_RUN_DIR = "/home/jovyan/cw/run"
 EXPECTED_STATE_DB = f"{EXPECTED_RUN_DIR}/CodingWorkspace.sqlite3"
 EXPECTED_BACKUP_DIR = f"{EXPECTED_RUN_DIR}/metadata-backups"
 TERMINATION_GRACE_ENV = "CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS"
-EXPECTED_CHILD_ENVIRONMENT = {
-    "CODINGWORKSPACE_AUTH_MODE": "jupyterhub",
-    "CODINGWORKSPACE_CONFIG_FILE": "/opt/codingworkspace-jupyter/runtime/CodingWorkspace.env",
-    "CODINGWORKSPACE_RUN_DIR": EXPECTED_RUN_DIR,
-    "CODINGWORKSPACE_STATE_DB": EXPECTED_STATE_DB,
-    "CODINGWORKSPACE_SQLITE_JOURNAL_MODE": "DELETE",
-    "CODINGWORKSPACE_SQLITE_SYNCHRONOUS": "FULL",
-    "CODINGWORKSPACE_DEPENDENCY_WHEELHOUSE": "/opt/codingworkspace-dependency-wheelhouse",
-    "CODINGWORKSPACE_DEPENDENCY_WHEELHOUSE_MODE": "prefer",
-    "CODINGWORKSPACE_PREVIEW_IDLE_TIMEOUT_SECONDS": "600",
-    "PYTHONNOUSERSITE": "1",
-    "PYTHONSAFEPATH": "1",
-}
+# The managed child is non-dumpable, so its environment cannot be read by this
+# same-UID helper; the parent Jupyter server's environment is asserted instead.
 EXPECTED_PARENT_ENVIRONMENT = {
     "JUPYTER_CONFIG_DIR": "/opt/codingworkspace-jupyter/config",
     "JUPYTER_RUNTIME_DIR": "/tmp/codingworkspace-jupyter-runtime",
@@ -212,11 +200,11 @@ def process_start_time(pid: int) -> str:
     return suffix[19]
 
 
-def same_executable(pid: int) -> bool:
-    try:
-        return os.path.samefile(f"/proc/{pid}/exe", EXPECTED_PYTHON)
-    except (FileNotFoundError, OSError):
-        return False
+def process_command(pid: int) -> tuple[str, ...]:
+    return tuple(
+        part.decode("utf-8", "strict")
+        for part in read_proc_file(f"/proc/{pid}/cmdline").rstrip(b"\0").split(b"\0")
+    )
 
 
 def exact_environment(environment: dict[str, str], required: dict[str, str]) -> bool:
@@ -237,36 +225,48 @@ def exact_budget_environment(
 
 
 def raw_process_match(pid: int, expected_uid: int) -> bool:
+    """Match the managed child using only files a non-dumpable process exposes.
+
+    CodingWorkspace makes itself non-dumpable (``PR_SET_DUMPABLE=0``) before it
+    starts any student process, so that same-UID student code cannot read its
+    credentials. Linux then owns ``/proc/<pid>`` by root and refuses same-UID
+    access to ``exe``, ``cwd``, ``environ``, ``fd``, and ``maps``; only
+    ``cmdline``, ``stat``, and ``status`` stay readable. An earlier version of
+    this helper checked ``exe`` here, which made every real pod look as if
+    CodingWorkspace were not running, so the hook returned ``not-running``
+    and Jupyter's own SIGTERM exit ended the container before the shutdown
+    checkpoint could be written.
+    """
+
     try:
-        if os.stat(f"/proc/{pid}", follow_symlinks=False).st_uid != expected_uid:
+        if process_command(pid) != EXPECTED_COMMAND:
             return False
-        command = tuple(
-            part.decode("utf-8", "strict")
-            for part in read_proc_file(f"/proc/{pid}/cmdline").rstrip(b"\0").split(b"\0")
-        )
-        return command == EXPECTED_COMMAND and same_executable(pid)
-    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError, UnicodeError):
+        _, user_ids = parse_status(read_proc_file(f"/proc/{pid}/status"))
+        return all(user_id == expected_uid for user_id in user_ids)
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError, UnicodeError, ValueError):
         return False
 
 
 def identify_candidate(
     pid: int, expected_uid: int, budget: ShutdownBudget
 ) -> Candidate | None:
+    """Bind the exact-argv child to the Jupyter parent that must have started it.
+
+    The child's own ``cwd``, ``exe``, and ``environ`` are unreadable once it is
+    non-dumpable, so the environment, working directory, and grace-period
+    assertions are made against the parent instead. jupyter-server-proxy is the
+    only process that launches this argv in the pod, the parent stays dumpable,
+    and its environment carries the Hub-injected grace value from which the
+    child's shutdown budget is derived.
+    """
+
     try:
         if not raw_process_match(pid, expected_uid):
-            return None
-        if os.readlink(f"/proc/{pid}/cwd") != EXPECTED_CWD:
             return None
         parent_pid, user_ids = parse_status(read_proc_file(f"/proc/{pid}/status"))
         if any(user_id != expected_uid for user_id in user_ids):
             return None
-        environment = parse_environment(read_proc_file(f"/proc/{pid}/environ"))
-        if not exact_environment(environment, EXPECTED_CHILD_ENVIRONMENT):
-            return None
-        if not exact_budget_environment(environment, budget, child=True):
-            return None
-        proxy_token = environment.get("CODINGWORKSPACE_PROXY_AUTH_TOKEN", "")
-        if len(proxy_token) < 32 or not environment.get("JUPYTERHUB_USER", "").strip():
+        if parent_pid <= 1:
             return None
 
         if os.stat(f"/proc/{parent_pid}", follow_symlinks=False).st_uid != expected_uid:

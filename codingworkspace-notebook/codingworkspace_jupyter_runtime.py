@@ -182,6 +182,7 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
         "CODINGWORKSPACE_ISOLATION_MODE": "bubblewrap",
         "CODINGWORKSPACE_BUBBLEWRAP_COMMAND": "/usr/bin/bwrap",
         "CODINGWORKSPACE_BUBBLEWRAP_PROC_MODE": "auto",
+        "CODINGWORKSPACE_BUBBLEWRAP_RUNTIME_ROOTS": "/usr:/opt",
         "CODINGWORKSPACE_ISOLATION_OPENCODE_COMMAND": "/usr/local/bin/opencode",
         "CODINGWORKSPACE_REMOTE_WORKERS_ENABLED": "0",
         "CODINGWORKSPACE_PERSONAL_MODEL_AUTH_ENABLED": "0",

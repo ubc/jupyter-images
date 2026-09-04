@@ -138,6 +138,80 @@ try:
             mismatched, budget, child=True
         )
 
+    # The real CodingWorkspace child is non-dumpable, which makes its
+    # /proc/<pid>/exe, cwd, and environ unreadable to this same-UID helper. The
+    # hook must still identify it through cmdline/status plus its dumpable
+    # Jupyter parent, or every Stop ends the container before the shutdown
+    # checkpoint is written. Reproduce that shape with a throwaway parent that
+    # carries the parent assertions and a child that drops dumpability.
+    import ctypes
+    import subprocess
+    with tempfile.TemporaryDirectory(prefix="cw-prestop-identity-") as identity_root:
+        cwd = Path(identity_root) / "empty-root"
+        cwd.mkdir()
+        child_marker = f"cw-prestop-child-{os.getpid()}"
+        # execve resets dumpability, so the child must drop it itself, exactly
+        # as CodingWorkspace does at startup (PR_SET_DUMPABLE = 4).
+        child_command = (
+            sys.executable,
+            "-c",
+            "import ctypes, time; ctypes.CDLL(None).prctl(4, 0, 0, 0, 0); time.sleep(60)",
+            child_marker,
+        )
+        parent_script = (
+            "import subprocess, sys\n"
+            "child = subprocess.Popen(sys.argv[1:])\n"
+            "print(child.pid, flush=True)\n"
+            "child.wait()\n"
+        )
+        parent_environment = {
+            **prestop.EXPECTED_PARENT_ENVIRONMENT,
+            prestop.TERMINATION_GRACE_ENV: "120",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        parent = subprocess.Popen(
+            [sys.executable, "-c", parent_script, *child_command],
+            cwd=str(cwd),
+            env=parent_environment,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            child_pid = int(parent.stdout.readline().strip())
+            saved = (prestop.EXPECTED_COMMAND, prestop.EXPECTED_CWD)
+            prestop.EXPECTED_COMMAND = child_command
+            prestop.EXPECTED_CWD = str(cwd)
+            try:
+                deadline = time.monotonic() + 10
+                # Prove the shape: the child exe link is unreadable while cmdline is not.
+                for _attempt in range(50):
+                    try:
+                        os.readlink(f"/proc/{child_pid}/exe")
+                    except PermissionError:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise AssertionError("throwaway child is still dumpable")
+                assert prestop.raw_process_match(child_pid, os.geteuid())
+                assert prestop.find_raw_matches(os.geteuid(), deadline) == [child_pid]
+                candidate = prestop.identify_candidate(child_pid, os.geteuid(), budget)
+                assert candidate is not None, "non-dumpable child was not identified"
+                assert candidate.pid == child_pid and candidate.parent_pid == parent.pid
+                # A parent that does not carry the Hub grace assertion is rejected.
+                wrong_budget = prestop.ShutdownBudget(
+                    termination_grace_seconds=121, hook_seconds=115.0, child_shutdown_seconds=90
+                )
+                assert prestop.identify_candidate(child_pid, os.geteuid(), wrong_budget) is None
+            finally:
+                prestop.EXPECTED_COMMAND, prestop.EXPECTED_CWD = saved
+        finally:
+            parent.kill()
+            parent.wait()
+            try:
+                os.kill(child_pid, 9)
+            except (ProcessLookupError, NameError):
+                pass
+
     with tempfile.TemporaryDirectory(prefix="cw-prestop-contract-") as temporary:
         root = Path(temporary)
         run_dir = root / "run"
