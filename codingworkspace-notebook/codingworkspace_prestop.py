@@ -58,6 +58,7 @@ MAX_CODINGWORKSPACE_SHUTDOWN_SECONDS = 90
 PRIMARY_QUICK_CHECK_MIN_SECONDS = 2.0
 PRIMARY_QUICK_CHECK_MAX_SECONDS = 5.0
 PRIMARY_QUICK_CHECK_RETURN_RESERVE_SECONDS = 1.0
+PRESTOP_RESTARTED_CHILD_WAIT_SECONDS = 5.0
 MAX_PROC_FILE_BYTES = 1024 * 1024
 # pidfd_open(2) and pidfd_send_signal(2) use the same numbers on every Linux
 # architecture that gained them (they postdate the unified syscall table). The
@@ -94,15 +95,53 @@ class ShutdownBudget:
     child_shutdown_seconds: int
 
 
+MAX_PRESTOP_LOG_BYTES = 256 * 1024
+
+
+def record_outcome(line: str) -> None:
+    """Append one outcome line to the retained volume for post-mortem reading.
+
+    The hook's stdout and stderr go to kubelet, which the course team cannot
+    read and whose ``FailedPreStopHook`` event carries no detail. The pod is
+    gone by the time anyone looks, so the volume is the only place the result
+    survives. Logging must never change the hook's outcome: every failure here
+    is swallowed.
+    """
+
+    try:
+        path = os.path.join(EXPECTED_RUN_DIR, "prestop.log")
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            details = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_nlink != 1
+                or details.st_uid != os.geteuid()
+            ):
+                return
+            if details.st_size > MAX_PRESTOP_LOG_BYTES:
+                os.ftruncate(descriptor, 0)
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            os.write(descriptor, f"{stamp} pid={os.getpid()} {line}\n".encode("utf-8"))
+        finally:
+            os.close(descriptor)
+    except OSError:
+        return
+
+
 def emit_alert(
     code: str, *, severity: str = "error", component: str = "runtime"
 ) -> None:
-    print(
+    line = (
         f"CW_ALERT v=1 severity={severity} code={code} "
-        f"component={component} phase=prestop",
-        file=sys.stderr,
-        flush=True,
+        f"component={component} phase=prestop"
     )
+    print(line, file=sys.stderr, flush=True)
+    record_outcome(line)
 
 
 def load_shutdown_budget() -> ShutdownBudget:
@@ -621,27 +660,79 @@ def run_prestop(deadline: float, budget: ShutdownBudget) -> int:
         os.close(pid_descriptor)
 
     # A clean CodingWorkspace SIGTERM returns zero, so simpervisor does not
-    # restart it. A nonzero child exit does restart; detect that replacement
-    # before declaring the hook safe.
+    # restart it. A nonzero child exit does restart, immediately. That
+    # replacement is not a drain failure: the drained instance already exited
+    # and its checkpoint is verified below. Record the replacement, verify the
+    # checkpoint first (so a second drain cannot make it ambiguous), then stop
+    # the replacement too, so the container teardown does not catch a fresh
+    # server in the middle of its own startup writes.
     quiet_deadline = min(
         time.monotonic() + PRESTOP_REPLACEMENT_QUIET_SECONDS,
         deadline,
     )
+    restarted_pids: list[int] = []
     while time.monotonic() < quiet_deadline:
-        if find_raw_matches(expected_uid, deadline):
-            raise PreStopFailure("prestop_target_restarted")
+        restarted_pids = find_raw_matches(expected_uid, deadline)
+        if restarted_pids:
+            emit_alert("prestop_target_restarted", severity="warning")
+            break
         time.sleep(min(0.1, require_time_remaining(deadline)))
     require_time_remaining(deadline)
 
     checkpoint = verify_shutdown_storage(checkpoints_before, expected_uid, deadline)
+    restarted = "none"
+    if restarted_pids:
+        restarted = stop_restarted_children(restarted_pids, expected_uid, budget, deadline)
     primary_status = verify_primary_storage_best_effort(expected_uid, deadline)
-    print(
+    line = (
         "CW_PRESTOP v=1 status=ok component=runtime "
         f"checkpoint={checkpoint} checkpoint_quick_check=ok "
-        f"primary_quick_check={primary_status}",
-        flush=True,
+        f"primary_quick_check={primary_status} restarted={restarted}"
     )
+    print(line, flush=True)
+    record_outcome(line)
     return 0
+
+
+def stop_restarted_children(
+    pids: list[int], expected_uid: int, budget: ShutdownBudget, deadline: float
+) -> str:
+    """Signal a supervisor-restarted CodingWorkspace and wait briefly for it.
+
+    Only a process that satisfies the same parent binding as the original
+    target is signalled. The wait is bounded well inside the hook budget; a
+    replacement that has not exited by then is reported, not treated as a
+    hook failure, because the drain contract was already met.
+    """
+
+    outcomes: list[str] = []
+    for pid in pids:
+        candidate = identify_candidate(pid, expected_uid, budget)
+        if candidate is None:
+            outcomes.append("unidentified")
+            continue
+        try:
+            pid_descriptor = pidfd_open(candidate.pid)
+        except (PreStopFailure, OSError):
+            outcomes.append("unsignalled")
+            continue
+        try:
+            pidfd_send_signal(pid_descriptor, signal.SIGTERM)
+            poller = select.poll()
+            poller.register(pid_descriptor, select.POLLIN)
+            wait_seconds = min(
+                PRESTOP_RESTARTED_CHILD_WAIT_SECONDS,
+                deadline - PRIMARY_QUICK_CHECK_RETURN_RESERVE_SECONDS - time.monotonic(),
+            )
+            if wait_seconds > 0 and poller.poll(int(wait_seconds * 1000)):
+                outcomes.append("terminated")
+            else:
+                outcomes.append("signalled")
+        except OSError:
+            outcomes.append("unsignalled")
+        finally:
+            os.close(pid_descriptor)
+    return "+".join(outcomes)
 
 
 def main() -> int:
