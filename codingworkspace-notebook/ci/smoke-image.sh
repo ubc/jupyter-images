@@ -212,6 +212,108 @@ try:
             except (ProcessLookupError, NameError):
                 pass
 
+    # Drive the hook through its real entry point on this interpreter. The
+    # conda CPython in the image lacks os.pidfd_open and signal.pidfd_send_signal,
+    # which made run_prestop fail its precondition before signalling anything
+    # on every real Stop; a test that only calls the matching functions cannot
+    # see that. The throwaway child writes a valid shutdown checkpoint when it
+    # receives SIGTERM, so the whole sequence must return 0 and report status=ok.
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory(prefix="cw-prestop-entry-") as entry_root:
+        root = Path(entry_root)
+        run_dir = root / "run"
+        backup_dir = run_dir / "metadata-backups"
+        cwd = root / "empty-root"
+        backup_dir.mkdir(parents=True)
+        cwd.mkdir()
+        run_dir.chmod(0o700)
+        backup_dir.chmod(0o700)
+        state_db = run_dir / "CodingWorkspace.sqlite3"
+        connection = sqlite3.connect(state_db)
+        connection.execute("CREATE TABLE durable(value TEXT NOT NULL)")
+        connection.commit()
+        connection.close()
+        state_db.chmod(0o600)
+        child_script = (
+            "import ctypes, os, signal, sqlite3, sys, time\n"
+            "ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"
+            "def stop(*_ignored):\n"
+            "    name = time.strftime(\"%Y%m%dT%H%M%S\") + \".000000Z-shutdown-0badf00d.sqlite3\"\n"
+            "    path = os.path.join(sys.argv[1], name)\n"
+            "    connection = sqlite3.connect(path)\n"
+            "    connection.execute(\"CREATE TABLE checkpoint(value TEXT NOT NULL)\")\n"
+            "    connection.commit()\n"
+            "    connection.close()\n"
+            "    os.chmod(path, 0o600)\n"
+            "    raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM, stop)\n"
+            "while True:\n"
+            "    time.sleep(0.1)\n"
+        )
+        child_command = (sys.executable, "-c", child_script, str(backup_dir))
+        parent_script = (
+            "import subprocess, sys\n"
+            "child = subprocess.Popen(sys.argv[1:])\n"
+            "print(child.pid, flush=True)\n"
+            "raise SystemExit(child.wait())\n"
+        )
+        parent_environment = {
+            **prestop.EXPECTED_PARENT_ENVIRONMENT,
+            prestop.TERMINATION_GRACE_ENV: "120",
+            "PATH": os.environ.get("PATH", ""),
+        }
+        parent = subprocess.Popen(
+            [sys.executable, "-c", parent_script, *child_command],
+            cwd=str(cwd),
+            env=parent_environment,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        saved = (
+            prestop.EXPECTED_COMMAND, prestop.EXPECTED_CWD, prestop.EXPECTED_RUN_DIR,
+            prestop.EXPECTED_STATE_DB, prestop.EXPECTED_BACKUP_DIR,
+        )
+        try:
+            child_pid = int(parent.stdout.readline().strip())
+            prestop.EXPECTED_COMMAND = child_command
+            prestop.EXPECTED_CWD = str(cwd)
+            prestop.EXPECTED_RUN_DIR = str(run_dir)
+            prestop.EXPECTED_STATE_DB = str(state_db)
+            prestop.EXPECTED_BACKUP_DIR = str(backup_dir)
+            for _attempt in range(50):
+                try:
+                    os.readlink(f"/proc/{child_pid}/exe")
+                except PermissionError:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("throwaway child is still dumpable")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = prestop.run_prestop(time.monotonic() + 40, budget)
+            assert result == 0, output.getvalue()
+            assert "CW_PRESTOP v=1 status=ok" in output.getvalue(), output.getvalue()
+            assert "checkpoint_quick_check=ok" in output.getvalue(), output.getvalue()
+            checkpoints = sorted(
+                name for name in os.listdir(backup_dir)
+                if prestop.SHUTDOWN_CHECKPOINT_RE.fullmatch(name)
+            )
+            assert len(checkpoints) == 1, checkpoints
+            assert parent.wait(timeout=10) == 0
+        finally:
+            (
+                prestop.EXPECTED_COMMAND, prestop.EXPECTED_CWD, prestop.EXPECTED_RUN_DIR,
+                prestop.EXPECTED_STATE_DB, prestop.EXPECTED_BACKUP_DIR,
+            ) = saved
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait()
+            try:
+                os.kill(child_pid, 9)
+            except (ProcessLookupError, NameError):
+                pass
+
     with tempfile.TemporaryDirectory(prefix="cw-prestop-contract-") as temporary:
         root = Path(temporary)
         run_dir = root / "run"
