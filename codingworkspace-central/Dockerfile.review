@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7
+ARG CENTRAL_PYTHON_BASE
+FROM ${CENTRAL_PYTHON_BASE} AS builder
+ARG CW_REF
+ENV PIP_CONFIG_FILE=/dev/null PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1
+COPY --from=inputs / /inputs/
+COPY verify_package.py /verify_package.py
+RUN --network=none python -m venv /build-tools && \
+    /build-tools/bin/pip install --no-index --no-deps --require-hashes -r /inputs/build.lock && \
+    /build-tools/bin/pip wheel --no-index --no-deps --no-build-isolation -w /app-wheel /inputs/source && \
+    python -m venv /opt/codingworkspace && \
+    /opt/codingworkspace/bin/pip install --no-index --no-deps --require-hashes -r /inputs/runtime.lock && \
+    /opt/codingworkspace/bin/pip install --no-index --no-deps /app-wheel/*.whl && \
+    /opt/codingworkspace/bin/pip check && \
+    /opt/codingworkspace/bin/python -I /verify_package.py /inputs/source-receipt.json "$CW_REF" && \
+    /opt/codingworkspace/bin/python -I -c 'import psycopg, codingworkspace.central_media_service, codingworkspace.collaboration_service' && \
+    cp /inputs/source-receipt.json /opt/codingworkspace/source-receipt.json && \
+    chmod -R a-w /opt/codingworkspace
+
+FROM ${CENTRAL_PYTHON_BASE} AS review-runtime
+ARG CW_REF
+ARG CENTRAL_PYTHON_BASE
+LABEL org.opencontainers.image.source="https://github.com/kevinlb1/CodingWorkspace" \
+      org.opencontainers.image.revision="${CW_REF}" \
+      org.opencontainers.image.base.name="${CENTRAL_PYTHON_BASE}" \
+      io.codingworkspace.activation="blocked-pending-reviewed-verifier"
+ENV PATH=/opt/codingworkspace/bin:/usr/local/bin:/usr/bin:/bin \
+    HOME=/nonexistent TMPDIR=/tmp PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    PIP_CONFIG_FILE=/dev/null PIP_NO_INDEX=1
+COPY --from=builder /opt/codingworkspace /opt/codingworkspace
+USER 10001:10001
+WORKDIR /opt/codingworkspace
+EXPOSE 8095 8097
+ENTRYPOINT ["/opt/codingworkspace/bin/codingworkspace-central-media"]
+CMD ["serve"]
