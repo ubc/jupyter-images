@@ -4,6 +4,7 @@ on:
   pull_request:
     paths: ['codingworkspace-central/**', '.github/workflows/build-cw-central.yml']
   push:
+    branches: [main]
     paths: ['codingworkspace-central/**', '.github/workflows/build-cw-central.yml']
   workflow_dispatch:
     inputs:
@@ -27,6 +28,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -158,7 +160,7 @@ jobs:
           name: central-media-review-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
       - name: Remove source and wheel staging even on failure
         if: always()
         run: rm -rf "$RUNNER_TEMP/cw-central-source" "$RUNNER_TEMP/cw-central-inputs" "$RUNNER_TEMP/cw-central-deploy-key" "$RUNNER_TEMP/cw-central-build.json"

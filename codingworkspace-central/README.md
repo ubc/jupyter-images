@@ -83,6 +83,21 @@ the source/image-repository commits, dependency lock, digest (when published),
 runtime smoke, SBOM, all-severity report, fixable-CRITICAL policy result, and
 checksums. It contains neither the private source/wheels nor the AWS account.
 
+Evidence artifacts are retained for 90 days. Before relying on a receipt in a
+longer-lived gate ledger, its owner must archive the evidence and checksums in
+the course/LTIC evidence store; an Actions link alone is not permanent storage.
+Build-only runs produce scan evidence (including the scanner's SBOM), but do
+not publish BuildKit provenance or an OCI SBOM attestation. Only the publication
+path provides those attestations; a local image receipt is not a published digest.
+
+The first build-only review retains the pinned official Docker Hub base so it
+needs no AWS setup. An LTIC mirror is a reasonable availability improvement,
+independent of where the final service runs, once its exact repository and
+digest are supplied. Adopt it through a reviewed lock/validator change that
+checks content equivalence and runs the same image smoke. Do not silently
+substitute a mutable mirror tag or relax the registry allowlist. If Docker Hub
+rate-limits the review build, record that failure and retry the pinned build.
+
 ## Local validation
 
 ```bash
