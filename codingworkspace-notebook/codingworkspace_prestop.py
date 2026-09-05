@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import json
 import os
 import platform
 import re
@@ -74,11 +75,17 @@ SHUTDOWN_CHECKPOINT_RE = re.compile(
 
 
 class PreStopFailure(RuntimeError):
-    """A credential-safe preStop failure with a stable alert code."""
+    """A credential-safe preStop failure with a stable alert code.
 
-    def __init__(self, code: str):
+    ``details`` is an optional, already-sanitized ``key=value`` string that the
+    alert line carries after the code, such as CodingWorkspace's own shutdown
+    outcome when the checkpoint is missing.
+    """
+
+    def __init__(self, code: str, details: str = ""):
         super().__init__(code)
         self.code = code
+        self.details = details
 
 
 @dataclass(frozen=True)
@@ -96,6 +103,12 @@ class ShutdownBudget:
 
 
 MAX_PRESTOP_LOG_BYTES = 256 * 1024
+# CodingWorkspace 1.0.16+ writes this at the end of every orderly stop. Its
+# exit status is always 0 there (simpervisor would restart a non-zero child
+# inside the terminating pod), so this file is what names the outcome: whether
+# the shutdown checkpoint was complete, degraded, or skipped, and why.
+SHUTDOWN_OUTCOME_FILE = "shutdown-outcome.json"
+MAX_SHUTDOWN_OUTCOME_BYTES = 64 * 1024
 
 
 def record_outcome(line: str) -> None:
@@ -134,12 +147,14 @@ def record_outcome(line: str) -> None:
 
 
 def emit_alert(
-    code: str, *, severity: str = "error", component: str = "runtime"
+    code: str, *, severity: str = "error", component: str = "runtime", details: str = ""
 ) -> None:
     line = (
         f"CW_ALERT v=1 severity={severity} code={code} "
         f"component={component} phase=prestop"
     )
+    if details:
+        line = f"{line} {details}"
     print(line, file=sys.stderr, flush=True)
     record_outcome(line)
 
@@ -602,6 +617,67 @@ def verify_primary_storage_best_effort(
     return "ok"
 
 
+def _log_token(value: object) -> str:
+    """One safe token for a log line: no whitespace, bounded, never empty."""
+
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = re.sub(r"[^A-Za-z0-9._:-]", "_", str(value))[:48]
+    return text or "none"
+
+
+def summarize_shutdown_outcome(expected_uid: int, signalled_at: float) -> str:
+    """Quote CodingWorkspace's own shutdown outcome for the prestop.log line.
+
+    A missing checkpoint used to need three platform-log lines to explain.
+    Since CodingWorkspace 1.0.16 every orderly stop writes
+    ``cw/run/shutdown-outcome.json``; quoting it here lets LT Hub triage from
+    ``prestop.log`` alone. Only a file modified since this hook signalled the
+    child counts: an older one describes a previous stop. Like
+    ``record_outcome``, this must never change the hook's result, so every
+    failure collapses to a token.
+    """
+
+    path = os.path.join(EXPECTED_RUN_DIR, SHUTDOWN_OUTCOME_FILE)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        return "shutdown_outcome=absent"
+    try:
+        details = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_nlink != 1
+            or details.st_uid != expected_uid
+            or details.st_size > MAX_SHUTDOWN_OUTCOME_BYTES
+        ):
+            return "shutdown_outcome=unreadable"
+        if details.st_mtime < signalled_at - 1.0:
+            return "shutdown_outcome=stale"
+        raw = os.read(descriptor, MAX_SHUTDOWN_OUTCOME_BYTES)
+    except OSError:
+        return "shutdown_outcome=unreadable"
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return "shutdown_outcome=invalid"
+    if not isinstance(value, dict):
+        return "shutdown_outcome=invalid"
+    in_flight = value.get("inFlight")
+    if not isinstance(in_flight, dict):
+        in_flight = {}
+    return (
+        f"shutdown_outcome={_log_token(value.get('checkpointState'))} "
+        f"shutdown_skip_reason={_log_token(value.get('checkpointSkipReason'))} "
+        f"shutdown_in_flight_mutations={_log_token(in_flight.get('mutatingRequests'))} "
+        f"shutdown_db_closed={_log_token(value.get('databaseClosed'))}"
+    )
+
+
 def run_prestop(deadline: float, budget: ShutdownBudget) -> int:
     expected_uid = os.geteuid()
     if expected_uid == 0:
@@ -633,6 +709,7 @@ def run_prestop(deadline: float, budget: ShutdownBudget) -> int:
         if rescanned_matches != [candidate.pid] or verified != candidate:
             raise PreStopFailure("prestop_target_changed")
         checkpoints_before = snapshot_shutdown_checkpoints(expected_uid, deadline)
+        signalled_at = time.time()
         pidfd_send_signal(pid_descriptor, signal.SIGTERM)
 
         poller = select.poll()
@@ -679,7 +756,14 @@ def run_prestop(deadline: float, budget: ShutdownBudget) -> int:
         time.sleep(min(0.1, require_time_remaining(deadline)))
     require_time_remaining(deadline)
 
-    checkpoint = verify_shutdown_storage(checkpoints_before, expected_uid, deadline)
+    # CodingWorkspace's own account of the stop, quoted on both outcomes so a
+    # missing checkpoint names its reason (degraded or skipped, what was in
+    # flight) without correlating platform-log lines.
+    shutdown_outcome = summarize_shutdown_outcome(expected_uid, signalled_at)
+    try:
+        checkpoint = verify_shutdown_storage(checkpoints_before, expected_uid, deadline)
+    except PreStopFailure as exc:
+        raise PreStopFailure(exc.code, details=shutdown_outcome) from None
     restarted = "none"
     if restarted_pids:
         restarted = stop_restarted_children(restarted_pids, expected_uid, budget, deadline)
@@ -687,7 +771,8 @@ def run_prestop(deadline: float, budget: ShutdownBudget) -> int:
     line = (
         "CW_PRESTOP v=1 status=ok component=runtime "
         f"checkpoint={checkpoint} checkpoint_quick_check=ok "
-        f"primary_quick_check={primary_status} restarted={restarted}"
+        f"primary_quick_check={primary_status} restarted={restarted} "
+        f"{shutdown_outcome}"
     )
     print(line, flush=True)
     record_outcome(line)
@@ -753,7 +838,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except PreStopFailure as exc:
-        emit_alert(exc.code)
+        emit_alert(exc.code, details=exc.details)
         raise SystemExit(1) from None
     except Exception as exc:
         emit_alert(f"prestop_unexpected_{exc.__class__.__name__.lower()}")

@@ -106,6 +106,7 @@ python3 codingworkspace-notebook/ci/test_prepare_git_blob_context.py -v
 python3 codingworkspace-notebook/ci/test_dependency_contract.py -v
 python3 codingworkspace-notebook/ci/test_update_opencode_release.py -v
 python3 codingworkspace-notebook/ci/test_verify_installed_source.py -v
+python3 codingworkspace-notebook/ci/test_prestop_shutdown_outcome.py -v
 
 expected_host_fingerprint='SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
 actual_host_fingerprint=$(ssh-keygen -lf codingworkspace-notebook/ci/github_known_hosts | awk '{print $2}')

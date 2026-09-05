@@ -252,7 +252,7 @@ try:
         connection.close()
         state_db.chmod(0o600)
         child_script = (
-            "import ctypes, os, signal, sqlite3, sys, time\n"
+            "import ctypes, json, os, signal, sqlite3, sys, time\n"
             "ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"
             "def stop(*_ignored):\n"
             "    name = time.strftime(\"%Y%m%dT%H%M%S\") + \".000000Z-shutdown-0badf00d.sqlite3\"\n"
@@ -262,6 +262,10 @@ try:
             "    connection.commit()\n"
             "    connection.close()\n"
             "    os.chmod(path, 0o600)\n"
+            "    outcome = os.path.join(os.path.dirname(sys.argv[1]), \"shutdown-outcome.json\")\n"
+            "    with open(outcome, \"w\") as handle:\n"
+            "        json.dump({\"checkpointState\": \"complete\", \"databaseClosed\": True, \"inFlight\": {\"mutatingRequests\": 0}}, handle)\n"
+            "    os.chmod(outcome, 0o600)\n"
             "    raise SystemExit(0)\n"
             "signal.signal(signal.SIGTERM, stop)\n"
             "while True:\n"
@@ -312,6 +316,8 @@ try:
             assert "CW_PRESTOP v=1 status=ok" in output.getvalue(), output.getvalue()
             assert "checkpoint_quick_check=ok" in output.getvalue(), output.getvalue()
             assert "restarted=none" in output.getvalue(), output.getvalue()
+            # CodingWorkspace 1.0.16+ writes shutdown-outcome.json; the hook quotes it.
+            assert "shutdown_outcome=complete shutdown_skip_reason=none shutdown_in_flight_mutations=0 shutdown_db_closed=true" in output.getvalue(), output.getvalue()
             # The outcome also lands on the retained volume for post-mortems.
             recorded = (run_dir / "prestop.log").read_text(encoding="utf-8")
             assert "CW_PRESTOP v=1 status=ok" in recorded, recorded

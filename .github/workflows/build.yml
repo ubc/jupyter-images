@@ -655,6 +655,28 @@ jobs:
             return 1
           }
 
+          # Registry tag reads are eventually consistent and `imagetools inspect`
+          # can transiently fail (returning an empty digest). A single read right
+          # after a push therefore cannot decide whether a move stuck: the D11
+          # promotion (run 33912383948) pushed both tags successfully, read back
+          # `latest` correctly, then failed this final check and rolled a good
+          # image back. Poll until the tag reports the expected digest, and only
+          # then report whatever it settled on.
+          settled_digest_for_tag() {
+            local tag="$1"
+            local expected="$2"
+            local observed=""
+            for attempt in $(seq 1 12); do
+              observed=$(digest_for_tag "$tag")
+              if [ -n "$observed" ] && [ "$observed" = "$expected" ]; then
+                printf '%s\n' "$observed"
+                return 0
+              fi
+              sleep 5
+            done
+            printf '%s\n' "$observed"
+          }
+
           rollback_armed=false
           previous_latest=not-observed
           previous_preview=not-observed
@@ -666,8 +688,13 @@ jobs:
             trap - EXIT
             set +e
 
-            final_latest=$(digest_for_tag latest)
-            final_preview=$(digest_for_tag preview)
+            if [ "$status" -eq 0 ]; then
+              final_latest=$(settled_digest_for_tag latest "$IMAGE_DIGEST")
+              final_preview=$(settled_digest_for_tag preview "$IMAGE_DIGEST")
+            else
+              final_latest=$(digest_for_tag latest)
+              final_preview=$(digest_for_tag preview)
+            fi
             if [ "$status" -eq 0 ] && {
               [ "$final_latest" != "$IMAGE_DIGEST" ] ||
               [ "$final_preview" != "$IMAGE_DIGEST" ];
