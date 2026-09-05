@@ -500,7 +500,49 @@ settings = load_settings()
 assert settings.auth_mode == "jupyterhub"
 assert settings.isolation_mode == "bubblewrap"
 assert bubblewrap_executable(settings) == "/usr/bin/bwrap", settings.bubblewrap_command
-print("CodingWorkspace accepts the image-injected JupyterHub environment")
+
+# The account menu shows __version__ as 1.0.<serial>. The serial is package
+# data, so a wheel that dropped it would read 1.0.0, and the distribution
+# metadata must agree with the module or the build resolved its version from
+# a tree other than the one it installed.
+import hashlib
+import importlib.metadata as md
+import json
+import subprocess
+import tempfile
+from pathlib import Path
+
+import codingworkspace
+from codingworkspace.exercises import exercise_asset_report
+
+assert codingworkspace.RELEASE_SERIAL > 0, codingworkspace.__version__
+assert codingworkspace.__version__.endswith(".%d" % codingworkspace.RELEASE_SERIAL), codingworkspace.__version__
+assert md.version("codingworkspace") == codingworkspace.__version__, (md.version("codingworkspace"), codingworkspace.__version__)
+
+# Hub mode loads exercise bundles only as image content, never from a student
+# volume, so the packaged assets must pass that ownership check here, match the
+# digests the catalog pins, and be complete Git bundles. The D12 image failed
+# every exercise start because a stale module was installed; this is the smoke
+# that would have caught it.
+report = exercise_asset_report(settings)
+assert report["available"] is True, report
+data_dir = Path(report["dataDir"])
+catalog = json.loads((data_dir / "catalog.json").read_text(encoding="utf-8"))
+assert catalog and len(catalog) == len(report["assets"]), (len(catalog), report)
+with tempfile.TemporaryDirectory() as scratch:
+    subprocess.run(["git", "init", "--quiet", scratch], check=True)
+    for item in catalog:
+        bundle = data_dir / (item["id"] + ".bundle")
+        digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+        assert digest == item["sha256"], (item["id"], digest)
+        subprocess.run(
+            ["git", "-C", scratch, "bundle", "verify", str(bundle)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+print(
+    "CodingWorkspace %s accepts the image-injected JupyterHub environment; %d exercise bundles verified"
+    % (codingworkspace.__version__, len(catalog))
+)
 PY
       test ! -e /etc/opencode/opencode.json
       test -z "${OPENCODE_CONFIG:-}"

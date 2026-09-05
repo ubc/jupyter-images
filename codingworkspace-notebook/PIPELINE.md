@@ -378,7 +378,23 @@ wheel through `sha256sum -c`, and absence of the global direct-OpenCode
 credential path. It also clones the baked starter into a disposable checkout,
 runs its real installer with `PIP_NO_INDEX=1`, initializes the database, runs
 `pip check` and imports, starts Gunicorn on loopback, and requires successful
-health and root HTTP requests before clean shutdown.
+health and root HTTP requests before clean shutdown. Under the exact environment
+the image injects through its Jupyter config it loads CodingWorkspace settings,
+requires the reported version to carry its release serial and agree with the
+distribution metadata, and requires every packaged exercise bundle to pass the
+Hub-mode image-ownership check, match its catalog digest, and verify as a
+complete Git bundle.
+
+The image build guards the CodingWorkspace install itself with
+`verify_installed_source.py`. Before `pip install`, the pristine `git archive`
+of the tracked commit must carry no setuptools output (`build/`, `dist/`,
+`*.egg-info`): setuptools reuses a tracked `build/lib`, so such a commit
+installs stale modules while every commit-based check stays green, which is
+how CodingWorkspace `55f2691` reached preview with a pre-fix module. After the
+install, every installed package file must equal the archive's file, every
+archive file must be installed, and `__version__` must end in the archive's
+`RELEASE_SERIAL`. Either failure fails the build, so it never reaches the
+smoke, scan, or promotion steps.
 
 Before moving `release`, run on a compatible Docker/cluster host:
 

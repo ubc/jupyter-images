@@ -202,9 +202,17 @@ LABEL org.codingworkspace.dependency-wheelhouse.layer-version="${DEPENDENCY_WHEE
 # Keep this frequently changing source layer after the stable starter wheelhouse.
 # The pinned base lacks aiohttp; install the complete proxy runtime from the
 # reviewed hash-locked Python 3.13 wheels without dependency resolution.
+# verify_installed_source.py guards the CodingWorkspace install itself: the
+# pristine archive must carry no setuptools output (a tracked build/lib makes
+# pip install stale modules while every commit check stays green), and what pip
+# installed must equal the archive file for file, with the reported version
+# following the archive's release serial. The archive phase must run before pip
+# because an in-tree build creates build/ legitimately.
 COPY codingworkspace-notebook/CW_REF /tmp/CW_REF
 COPY --chown=${NB_UID}:${NB_GID} --chmod=0444 \
     codingworkspace-notebook/proxy-requirements.txt /tmp/proxy-requirements.txt
+COPY --chown=${NB_UID}:${NB_GID} --chmod=0444 \
+    codingworkspace-notebook/verify_installed_source.py /tmp/verify_installed_source.py
 USER ${NB_UID}
 RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
     set -eux; \
@@ -225,13 +233,16 @@ RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
     mkdir -p /tmp/cwbuild; \
     git -C /tmp/cwrepo archive --format=tar "${build_ref}" \
         | tar -C /tmp/cwbuild -xf -; \
+    python -I /tmp/verify_installed_source.py archive --source /tmp/cwbuild; \
     pip install --no-cache-dir --no-deps --only-binary=:all: --require-hashes \
         --requirement /tmp/proxy-requirements.txt; \
     pip install --no-cache-dir --no-deps --no-build-isolation /tmp/cwbuild; \
     pip check; \
     python -c 'import importlib.metadata as m; assert m.version("jupyterhub") == "5.5.0"; assert m.version("jupyter-server-proxy") == "4.5.0"; assert m.version("aiohttp") == "3.14.3"; assert m.version("simpervisor") == "1.0.0"; assert m.version("notebook") == "7.6.1"; assert m.version("jupyterlab") == "4.6.2"'; \
+    python -I /tmp/verify_installed_source.py installed \
+        --source /tmp/cwbuild --package codingworkspace; \
     rm -rf /tmp/cwbuild /tmp/cwrepo; \
-    rm -f /tmp/proxy-requirements.txt
+    rm -f /tmp/proxy-requirements.txt /tmp/verify_installed_source.py
 USER root
 LABEL org.codingworkspace.source-revision="${CW_REF}" \
       org.codingworkspace.starter-revision="${GIZMOAPP_REF}" \
