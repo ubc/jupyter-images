@@ -1,0 +1,166 @@
+name: Build CodingWorkspace central media review image
+
+on:
+  pull_request:
+    paths: ['codingworkspace-central/**', '.github/workflows/build-cw-central.yml']
+  push:
+    branches: [main]
+    paths: ['codingworkspace-central/**', '.github/workflows/build-cw-central.yml']
+  workflow_dispatch:
+    inputs:
+      codingworkspace_sha:
+        description: Exact source commit reachable from CodingWorkspace main
+        required: true
+        type: string
+      publish:
+        description: Publish a run-unique review candidate to ECR (never deploy or promote)
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cw-central-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Test source, package, dependency and workflow boundaries without secrets
+        run: python3 -m unittest discover -s codingworkspace-central -p 'test_*.py' -v
+
+  build:
+    needs: validate
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'ubc/jupyter-images' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: codingworkspace-central-publication
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CW_REF: ${{ inputs.codingworkspace_sha }}
+      LOCAL_IMAGE: local/codingworkspace-central:review
+    steps:
+      - name: Require the protected independent review environment
+        env:
+          POLICY_ACK: ${{ vars.CODINGWORKSPACE_CENTRAL_POLICY_ACK }}
+        run: test "$POLICY_ACK" = main-only-independent-review-no-admin-bypass-v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Read exact course source with a temporary read-only deploy key
+        env:
+          CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          python3 -c 'import os,re; assert re.fullmatch("[0-9a-f]{40}", os.environ["CW_REF"])'
+          test -n "$CW_DEPLOY_KEY"
+          keyfile="$RUNNER_TEMP/cw-central-deploy-key"
+          trap 'rm -f "$keyfile"' EXIT
+          umask 077
+          printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
+          GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts -o StrictHostKeyChecking=yes" \
+            git clone --quiet --no-tags git@github.com:kevinlb1/CodingWorkspace.git "$RUNNER_TEMP/cw-central-source"
+          git -C "$RUNNER_TEMP/cw-central-source" checkout --quiet --detach "$CW_REF"
+          python3 codingworkspace-notebook/ci/verify_cw_candidate.py "$RUNNER_TEMP/cw-central-source" "$CW_REF"
+      - name: Prepare a credential-free source archive and verified public wheels
+        run: |
+          set -euo pipefail
+          python3 codingworkspace-central/prepare_context.py \
+            "$RUNNER_TEMP/cw-central-source" "$CW_REF" "$RUNNER_TEMP/cw-central-inputs"
+          base=$(python3 -c 'import json; print(json.load(open("codingworkspace-central/runtime-lock.json"))["baseImage"])')
+          printf 'CENTRAL_PYTHON_BASE=%s\n' "$base" >> "$GITHUB_ENV"
+          rm -rf "$RUNNER_TEMP/cw-central-source"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Obtain the central-repository-only publication role
+        if: inputs.publish == true
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-codingworkspace-central-publication
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Authenticate to ECR only for requested publication
+        if: inputs.publish == true
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+      - name: Build the review candidate with offline package installation
+        env:
+          PUBLISH: ${{ inputs.publish }}
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          args=(--load -t "$LOCAL_IMAGE")
+          if [ "$PUBLISH" = true ]; then
+            test -n "$ACCOUNT_ID"
+            test -n "$AWS_REGION"
+            repository="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/codingworkspace-central"
+            tag="review-${CW_REF}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+            args=(--push --provenance=mode=max --sbom=true -t "$repository:$tag")
+          fi
+          docker buildx build "${args[@]}" --platform linux/amd64 \
+            --build-arg "CENTRAL_PYTHON_BASE=$CENTRAL_PYTHON_BASE" --build-arg "CW_REF=$CW_REF" \
+            --build-context "inputs=$RUNNER_TEMP/cw-central-inputs" \
+            --metadata-file "$RUNNER_TEMP/cw-central-build.json" \
+            -f codingworkspace-central/Dockerfile.review codingworkspace-central
+          if [ "$PUBLISH" = true ]; then
+            digest=$(python3 -c 'import json,sys,re; d=json.load(open(sys.argv[1]))["containerimage.digest"]; assert re.fullmatch("sha256:[0-9a-f]{64}",d); print(d)' "$RUNNER_TEMP/cw-central-build.json")
+            docker pull "$repository@$digest"
+            docker tag "$repository@$digest" "$LOCAL_IMAGE"
+            # Keep the private registry account out of the public evidence.
+            printf '%s\n' "$digest" > evidence/image-digest.txt
+            printf '%s\n' "$tag" > evidence/immutable-tag.txt
+          fi
+          test "$(docker inspect --format '{{.Os}}/{{.Architecture}}' "$LOCAL_IMAGE")" = linux/amd64
+          test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$LOCAL_IMAGE")" = "$CW_REF"
+          test "$(docker inspect --format '{{index .Config.Labels "io.codingworkspace.activation"}}' "$LOCAL_IMAGE")" = blocked-pending-reviewed-verifier
+      - name: Smoke the exact runtime and prove missing verifier refuses authentication
+        run: |
+          set -euo pipefail
+          docker run --rm -i --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+            --entrypoint /opt/codingworkspace/bin/python "$LOCAL_IMAGE" - "$CW_REF" \
+            < codingworkspace-central/smoke.py | tee evidence/smoke.json
+      - name: Scan the exact image and enforce the existing vulnerability policy
+        run: codingworkspace-notebook/ci/scan-local-image.sh "$LOCAL_IMAGE" evidence
+      - name: Record review evidence without private source or wheel bytes
+        run: |
+          set -euo pipefail
+          cp codingworkspace-central/runtime-lock.json evidence/runtime-lock.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('evidence/review-receipt.json').write_text(json.dumps({
+              'kind': 'CodingWorkspaceCentralReviewReceipt', 'sourceCommit': os.environ['CW_REF'],
+              'imageRepositoryCommit': os.environ['GITHUB_SHA'], 'runId': os.environ['GITHUB_RUN_ID'],
+              'attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'studentActivation': False,
+              'activationBlocker': 'reviewed verifier and real-cluster gates not supplied',
+              'scope': 'package, runtime and image-security review only'}, indent=2) + '\n')
+          PY
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          root = Path('evidence')
+          files = sorted(p for p in root.iterdir() if p.suffix in {'.json', '.txt'})
+          (root / 'SHA256SUMS').write_text(''.join(
+              f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: central-media-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Remove source and wheel staging even on failure
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/cw-central-source" "$RUNNER_TEMP/cw-central-inputs" "$RUNNER_TEMP/cw-central-deploy-key" "$RUNNER_TEMP/cw-central-build.json"
