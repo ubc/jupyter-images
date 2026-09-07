@@ -80,7 +80,7 @@ def create_workspace(request, request_id, *, legacy=False):
             raise SmokeError("Completed replay did not reuse the workspace")
     verify_workspace(request, workspace_id, None if legacy else request_id)
     status, payload = request("GET", "/api/workspaces")
-    matches = [item for item in payload.get("workspaces", []) if item.get("assignment_slug") == "image-smoke"]
+    matches = [item for item in payload.get("workspaces", []) if item.get("assignmentSlug") == "image-smoke"]
     if status != 200 or len(matches) != 1 or matches[0].get("id") != workspace_id:
         raise SmokeError("Creation or response replay duplicated the smoke project")
     return workspace_id

@@ -29,10 +29,10 @@ class CreationServer:
             self.complete = not self.failed
             return 200, {"creation": self.receipt(), "workspace": {"id": self.workspace_id}}
         if path == "/api/workspaces":
-            workspace = {"id": self.workspace_id, "assignment_slug": "image-smoke"}
+            workspace = {"id": self.workspace_id, "assignmentSlug": "image-smoke"}
             rows = [workspace] if self.complete else []
             if self.duplicate:
-                rows.append({"id": "ws-111111111111", "assignment_slug": "image-smoke"})
+                rows.append({"id": "ws-111111111111", "assignmentSlug": "image-smoke"})
             return 200, {"workspaces": rows}
         raise AssertionError((method, path))
 
