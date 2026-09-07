@@ -214,6 +214,9 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
         ) from exc
     required_environment = {
         "CODINGWORKSPACE_AUTH_MODE": "jupyterhub",
+        "CODINGWORKSPACE_COURSE_ROLE": os.environ.get("CODINGWORKSPACE_COURSE_ROLE", ""),
+        "CODINGWORKSPACE_COURSE_ROLE_SUBJECT": os.environ.get("CODINGWORKSPACE_COURSE_ROLE_SUBJECT", ""),
+        "CODINGWORKSPACE_COURSE_ROLE_REVISION": os.environ.get("CODINGWORKSPACE_COURSE_ROLE_REVISION", ""),
         # This entry is the tamper check, so it has to match what the proxy
         # config actually sets or the extension refuses to load and the
         # codingworkspace route never binds. CodingWorkspace requires
