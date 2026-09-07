@@ -151,6 +151,11 @@ cw_env = {
     "PYTHONNOUSERSITE": "1",
     "PYTHONSAFEPATH": "1",
     "CODINGWORKSPACE_ADMIN_USERS": os.environ.get("CODINGWORKSPACE_ADMIN_USERS", ""),
+    # Per-pod course-role hints. CW validates the subject against JUPYTERHUB_USER;
+    # central staff actions still require independent authorization.
+    "CODINGWORKSPACE_COURSE_ROLE": os.environ.get("CODINGWORKSPACE_COURSE_ROLE", ""),
+    "CODINGWORKSPACE_COURSE_ROLE_SUBJECT": os.environ.get("CODINGWORKSPACE_COURSE_ROLE_SUBJECT", ""),
+    "CODINGWORKSPACE_COURSE_ROLE_REVISION": os.environ.get("CODINGWORKSPACE_COURSE_ROLE_REVISION", ""),
     # CodingWorkspace releases after 3f7d93d4 require Bubblewrap in JupyterHub
     # mode and refuse to start otherwise (CW-JH-STARTUP-001). Student apps,
     # installers, validation, and agents run in fresh mount/PID/user

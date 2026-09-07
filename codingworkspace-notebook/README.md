@@ -431,3 +431,16 @@ pushes. Its recorded `published-image.txt` names the resulting registry digest.
 `PLATFORM` is intentionally restricted to `linux/amd64` for this release;
 production promotion still uses the trusted workflow, accepted digest,
 amd64 scheduling contract, and independent release-record gate.
+
+### Course-staff role hints
+
+The Hub may inject `CODINGWORKSPACE_COURSE_ROLE` (`student`, `instructor`, or
+`ta`), `CODINGWORKSPACE_COURSE_ROLE_SUBJECT` (this pod's `JUPYTERHUB_USER`) and
+`CODINGWORKSPACE_COURSE_ROLE_REVISION` (a roster revision). The image forwards
+all three verbatim, with empty defaults, and refuses proxy-config overrides.
+A CW release containing the new role reader validates the subject and displays
+distinct staff labels; older CW releases ignore these optional inputs. Keep
+roles sourced from LTIC configuration, not a student PVC. Changes take effect
+on Stop/Start. No roster is embedded in the image and no Hub-wide admin grant
+is requested. Central staff actions require independent verified identity and
+membership; these pod-local hints are not central authorization proof.
