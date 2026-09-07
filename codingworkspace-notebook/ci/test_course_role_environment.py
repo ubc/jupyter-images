@@ -17,6 +17,7 @@ KEYS = ("CODINGWORKSPACE_COURSE_ROLE", "CODINGWORKSPACE_COURSE_ROLE_SUBJECT",
 class RoleEnvironmentTests(unittest.TestCase):
     def setUp(self):
         self.env = dict(zip(KEYS, ("ta", "staff-a", "roster-7")))
+        self.env["JUPYTERHUB_USER"] = "staff-a"
         self.env["CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS"] = "120"
         self.patch = patch.dict(os.environ, self.env, clear=True)
         self.patch.start(); self.addCleanup(self.patch.stop)
@@ -60,7 +61,24 @@ class RoleEnvironmentTests(unittest.TestCase):
                 self.environment[key] = original
         self.app.web_app.add_handlers.assert_not_called()
 
+    def test_invalid_roles_subjects_and_partial_assignments_refuse_registration(self):
+        for changes in ({KEYS[0]: "admin"}, {KEYS[1]: "someone-else"},
+                        {KEYS[0]: ""}, {KEYS[2]: ""}, {KEYS[2]: "bad revision"}):
+            with self.subTest(changes=changes), patch.dict(os.environ, changes):
+                with self.assertRaisesRegex(RuntimeError, "Invalid or mismatched"):
+                    self.load(self.app)
+        self.app.web_app.add_handlers.assert_not_called()
+
+    def test_mutation_between_proxy_evaluation_and_extension_load_is_rejected(self):
+        # self.environment was evaluated before this mutation. This tests the
+        # load-order guard, unlike the wiring-only expression test below.
+        with patch.dict(os.environ, {KEYS[0]: "instructor"}):
+            with self.assertRaisesRegex(RuntimeError, "overridden"):
+                self.load(self.app)
+        self.app.web_app.add_handlers.assert_not_called()
+
     def test_proxy_passes_exact_values_and_empty_defaults(self):
+        # Wiring only: this does not authenticate a role or test evaluation order.
         tree = ast.parse((ROOT / "codingworkspace_server_proxy_config.py").read_text())
         env_node = next(n.value for n in tree.body if isinstance(n, ast.Assign)
                         and any(isinstance(t, ast.Name) and t.id == "cw_env" for t in n.targets))

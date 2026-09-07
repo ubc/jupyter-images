@@ -212,6 +212,17 @@ def _load_jupyter_server_extension(server_app: Any) -> None:
         raise RuntimeError(
             "The Hub termination grace assertion is missing or unsafe"
         ) from exc
+    role = os.environ.get("CODINGWORKSPACE_COURSE_ROLE", "").strip()
+    role_subject = os.environ.get("CODINGWORKSPACE_COURSE_ROLE_SUBJECT", "").strip().casefold()
+    role_revision = os.environ.get("CODINGWORKSPACE_COURSE_ROLE_REVISION", "").strip()
+    if any((role, role_subject, role_revision)):
+        if (role not in {"student", "instructor", "ta"}
+                or not role_subject
+                or role_subject != os.environ.get("JUPYTERHUB_USER", "").strip().casefold()
+                or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", role_subject)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,99}", role_revision)):
+            raise RuntimeError("Invalid or mismatched Hub course-role configuration")
+
     required_environment = {
         "CODINGWORKSPACE_AUTH_MODE": "jupyterhub",
         "CODINGWORKSPACE_COURSE_ROLE": os.environ.get("CODINGWORKSPACE_COURSE_ROLE", ""),
