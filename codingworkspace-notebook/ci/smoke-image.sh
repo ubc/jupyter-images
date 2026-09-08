@@ -7,6 +7,20 @@ set -euo pipefail
 # RUNTIME_PINS.env. Same derivation as ci/validate-static.sh.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Student pods run with NO seccomp profile: the AI 100 profiles set no
+# securityContext.seccompProfile and the kubelet reports seccompDefault:false
+# (verified on jupyter-open-preview, 2026-09-08). Docker instead applies its
+# builtin profile by default, and that profile denies clone(CLONE_NEWUSER), so
+# bubblewrap cannot create a user namespace and CodingWorkspace reports
+# functional:false. Confirmed identically on macOS Docker Desktop (arm64),
+# Flatcar Docker 28.0.4 (amd64) and GitHub ubuntu-latest (amd64).
+#
+# So the DEFAULT Docker sandbox is stricter than production, not weaker, and
+# running these checks under it tests a configuration no student pod ever has.
+# Apply the pod-equivalent setting to the containers whose behaviour depends on
+# it: the bubblewrap probe, and any server that runs CodingWorkspace.
+POD_SECCOMP=(--security-opt seccomp=unconfined)
+
 usage() {
   cat >&2 <<'EOF'
 usage:
@@ -595,7 +609,7 @@ namespace_probe() {
   # --unshare-all/--share-net/--unshare-user/--disable-userns/cap-drop flags,
   # rather than a weaker hand-written namespace command that could pass while
   # CodingWorkspace /readyz fails.
-  docker run --rm --entrypoint python "$IMAGE" -c '
+  docker run --rm "${POD_SECCOMP[@]}" --entrypoint python "$IMAGE" -c '
 from types import SimpleNamespace
 from codingworkspace.bubblewrap import bubblewrap_status
 
@@ -688,6 +702,7 @@ start_server() {
   local server_image=${3:-$IMAGE}
   containers+=("$name")
   docker run -d --name "$name" \
+    "${POD_SECCOMP[@]}" \
     -v "$volume:/home/jovyan" \
     -e "JUPYTERHUB_USER=$USER_NAME" \
     -e "JUPYTERHUB_SERVICE_PREFIX=$BASE_URL" \
