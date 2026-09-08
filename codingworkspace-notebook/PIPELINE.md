@@ -400,8 +400,20 @@ Before moving `release`, run on a compatible Docker/cluster host:
 
 ```bash
 codingworkspace-notebook/ci/smoke-image.sh namespace IMAGE
-codingworkspace-notebook/ci/smoke-image.sh lifecycle IMAGE CW_FULL_SHA GIZMO_FULL_SHA
+codingworkspace-notebook/ci/smoke-image.sh lifecycle IMAGE CW_FULL_SHA GIZMO_FULL_SHA PRIOR_IMAGE_BY_DIGEST
 ```
+
+Use the prior release's already-pulled immutable `repository@sha256:...` image
+for `PRIOR_IMAGE_BY_DIGEST`. This seeds a separate disposable home on the prior
+image, shuts it down cleanly, then starts the candidate on that unchanged home
+and verifies the old workspace survives. Omitting the optional fifth argument
+checks only a same-image restart and explicitly reports that no prior-release
+upgrade was tested; it does not satisfy an upgrade gate. The images must run
+as the same non-root UID/GID. No real student's home is mounted.
+
+The `contract` mode invoked by the publication workflow does not run this
+lifecycle harness. A green candidate build/scan therefore needs this separate
+HTTP startup/upgrade receipt before the course advances `release`.
 
 The lifecycle mode creates uniquely named disposable Docker volumes and covers:
 
@@ -410,6 +422,9 @@ The lifecycle mode creates uniquely named disposable Docker volumes and covers:
 - adversarial retained Python user-site content that must never shadow the
   trusted control package;
 - starter-backed project bootstrap without a network credential;
+- asynchronous project creation through `202` acceptance and authenticated
+  polling, replay of a lost acceptance response, completed-request replay,
+  exactly one resulting project, and retained receipt identity after restart;
 - direct-loopback capability rejection and allowed authenticated proxy access;
 - direct denial of contents, kernel, session, terminal, Lab, and tree routes;
 - exact same-UID/pidfd preStop targeting, bounded SIGTERM, a newly published

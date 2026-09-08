@@ -12,11 +12,13 @@ usage() {
 usage:
   smoke-image.sh contract IMAGE CW_REF GIZMOAPP_REF
   smoke-image.sh namespace IMAGE
-  smoke-image.sh lifecycle IMAGE CW_REF GIZMOAPP_REF
+  smoke-image.sh lifecycle IMAGE CW_REF GIZMOAPP_REF [PRIOR_IMAGE_BY_DIGEST]
 
 "contract" is safe for ordinary trusted CI. "namespace" requires a host that
 permits unprivileged user/mount/PID namespaces. "lifecycle" additionally runs
 fresh/retained/stale-home and Jupyter route/proxy/shutdown checks with Docker.
+Supply the prior release by immutable digest to also prove an actual upgrade.
+Without it, retained-home evidence proves only a restart of the candidate.
 EOF
   exit 2
 }
@@ -627,6 +629,14 @@ CW_REF=${3:-}
 GIZMOAPP_REF=${4:-}
 require_ref "$CW_REF"
 require_ref "$GIZMOAPP_REF"
+PRIOR_IMAGE=${5:-}
+if [ -n "$PRIOR_IMAGE" ]; then
+  [[ "$PRIOR_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || {
+    echo "prior image must use an immutable registry digest" >&2
+    exit 1
+  }
+  docker image inspect "$PRIOR_IMAGE" >/dev/null
+fi
 contract "$@"
 namespace_probe
 
@@ -637,6 +647,10 @@ link_volume="cw-smoke-link-$suffix"
 special_volume="cw-smoke-special-$suffix"
 containers=()
 volumes=("$fresh_volume" "$bad_volume" "$link_volume" "$special_volume")
+upgrade_volume="cw-smoke-upgrade-$suffix"
+if [ -n "$PRIOR_IMAGE" ]; then
+  volumes+=("$upgrade_volume")
+fi
 
 cleanup() {
   local item
@@ -671,13 +685,14 @@ BASE_URL="/user/$USER_NAME/"
 start_server() {
   local volume=$1
   local name=$2
+  local server_image=${3:-$IMAGE}
   containers+=("$name")
   docker run -d --name "$name" \
     -v "$volume:/home/jovyan" \
     -e "JUPYTERHUB_USER=$USER_NAME" \
     -e "JUPYTERHUB_SERVICE_PREFIX=$BASE_URL" \
     -e "CODINGWORKSPACE_KUBERNETES_TERMINATION_GRACE_SECONDS=120" \
-    "$IMAGE" start-notebook.py \
+    "$server_image" start-notebook.py \
       --ServerApp.base_url="$BASE_URL" \
       --IdentityProvider.token="$TOKEN" \
       --ServerApp.open_browser=False >/dev/null
@@ -791,12 +806,11 @@ done
 bootstrap_code=$(request_code "$fresh_container" "${BASE_URL}codingworkspace/api/bootstrap" \
   -H 'X-CodingWorkspace-Request: 1')
 test "$bootstrap_code" = 200
-create_code=$(request_code "$fresh_container" "${BASE_URL}codingworkspace/api/workspaces" \
-  -X POST \
-  -H 'Content-Type: application/json' \
-  -H 'X-CodingWorkspace-Request: 1' \
-  --data '{"assignmentSlug":"image-smoke","displayName":"Image smoke starter"}')
-test "$create_code" = 201
+creation_request_id="image-smoke-creation-$suffix"
+created_workspace_id=$(docker exec -i -e "CW_SMOKE_TOKEN=$TOKEN" "$fresh_container" \
+  /opt/conda/bin/python - create "http://127.0.0.1:8888${BASE_URL}codingworkspace" \
+  "$creation_request_id" < "$SCRIPT_DIR/smoke_workspace_creation.py")
+[[ "$created_workspace_id" =~ ^ws-[a-f0-9]{12}$ ]]
 docker exec "$fresh_container" test -d /home/jovyan/cw/workspaces
 docker exec "$fresh_container" find /home/jovyan/cw/workspaces -type d -name .git -print -quit | grep -q .
 docker exec "$fresh_container" test ! -e /home/jovyan/cw/run/github-credentials
@@ -809,10 +823,41 @@ docker stop --time 15 "$fresh_container" >/dev/null
 retained_container="cw-smoke-retained-$suffix"
 start_server "$fresh_volume" "$retained_container"
 wait_for_code "$retained_container" "${BASE_URL}codingworkspace/readyz" 200
+docker exec -i -e "CW_SMOKE_TOKEN=$TOKEN" "$retained_container" \
+  /opt/conda/bin/python - verify "http://127.0.0.1:8888${BASE_URL}codingworkspace" \
+  "$created_workspace_id" --request-id "$creation_request_id" < "$SCRIPT_DIR/smoke_workspace_creation.py"
 docker exec "$retained_container" test ! -e /home/jovyan/cw-shadow-imported
 docker exec "$retained_container" find /home/jovyan/cw/workspaces -type d -name .git -print -quit | grep -q .
 run_verified_prestop "$retained_container"
 docker stop --time 15 "$retained_container" >/dev/null
+
+# A candidate restarted on its own home does not exercise schema upgrades.
+# Seed this separate disposable volume using the exact previous release, then
+# start the candidate against that unchanged volume and verify its old project.
+if [ -n "$PRIOR_IMAGE" ]; then
+  test "$(docker run --rm --entrypoint id "$PRIOR_IMAGE" -u)" = "$NB_UID"
+  test "$(docker run --rm --entrypoint id "$PRIOR_IMAGE" -g)" = "$NB_GID"
+  prior_container="cw-smoke-prior-$suffix"
+  start_server "$upgrade_volume" "$prior_container" "$PRIOR_IMAGE"
+  wait_for_code "$prior_container" "${BASE_URL}codingworkspace/readyz" 200
+  prior_workspace_id=$(docker exec -i -e "CW_SMOKE_TOKEN=$TOKEN" "$prior_container" \
+    /opt/conda/bin/python - legacy "http://127.0.0.1:8888${BASE_URL}codingworkspace" \
+    "unused-legacy-request" < "$SCRIPT_DIR/smoke_workspace_creation.py")
+  [[ "$prior_workspace_id" =~ ^ws-[a-f0-9]{12}$ ]]
+  run_verified_prestop "$prior_container"
+  docker stop --time 15 "$prior_container" >/dev/null
+  upgraded_container="cw-smoke-upgraded-$suffix"
+  start_server "$upgrade_volume" "$upgraded_container"
+  wait_for_code "$upgraded_container" "${BASE_URL}codingworkspace/readyz" 200
+  docker exec -i -e "CW_SMOKE_TOKEN=$TOKEN" "$upgraded_container" \
+    /opt/conda/bin/python - verify "http://127.0.0.1:8888${BASE_URL}codingworkspace" \
+    "$prior_workspace_id" < "$SCRIPT_DIR/smoke_workspace_creation.py"
+  run_verified_prestop "$upgraded_container"
+  docker stop --time 15 "$upgraded_container" >/dev/null
+  echo "Prior-release retained-home upgrade smoke passed: $PRIOR_IMAGE -> $IMAGE"
+else
+  echo "Prior-release retained-home upgrade was not tested (supply PRIOR_IMAGE_BY_DIGEST)."
+fi
 
 assert_safe_stale_failure() {
   local volume=$1
