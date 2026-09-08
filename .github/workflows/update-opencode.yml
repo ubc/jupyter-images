@@ -87,19 +87,12 @@ jobs:
           branch="automation/opencode-v${VERSION}"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          pr_url=$(gh pr list --state open --head "$branch" --json url --jq '.[0].url // ""')
+          # A denied bot-PR policy is an explicit deferred update, not a
+          # reason to recreate/overwrite its existing branch every six hours.
+          pr_url=$(python3 codingworkspace-notebook/ci/prepare_opencode_proposal.py \
+            --version "$VERSION" --published-at "$PUBLISHED_AT")
           if [ -z "$pr_url" ]; then
-            git switch --create "$branch"
-            git add codingworkspace-notebook/RUNTIME_PINS.env
-            git commit -m "auto: update OpenCode to ${VERSION}"
-            git push origin "HEAD:refs/heads/$branch"
-            pr_url=$(gh pr create \
-              --base main \
-              --head "$branch" \
-              --title "auto: update OpenCode to ${VERSION}" \
-              --body "Automated stable-release update. The release was published at ${PUBLISHED_AT}, passed the 48-hour soak, matched GitHub's published SHA-256 digests for amd64-baseline and arm64, and passed the image CLI contract checks. After protected validation and merge, a trusted main dispatch will rebuild, smoke-test, produce an SBOM, scan, and reject fixable critical vulnerabilities before moving preview.")
-          else
-            echo "Rechecking existing update PR: $pr_url"
+            exit 0
           fi
           head_sha=$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)
           gh workflow run build.yml --ref "$branch" \
