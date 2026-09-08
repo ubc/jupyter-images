@@ -411,6 +411,20 @@ checks only a same-image restart and explicitly reports that no prior-release
 upgrade was tested; it does not satisfy an upgrade gate. The images must run
 as the same non-root UID/GID. No real student's home is mounted.
 
+The transcript emits `CW_LIFECYCLE_UPGRADE v=1 status=passed` only after the
+prior-image workspace survives candidate startup and shutdown; without a prior
+image it emits `status=skipped reason=no-prior-image`. An upgrade gate must
+require the passed marker as well as a successful overall lifecycle exit.
+If the prior digest is not available locally, the harness names it and asks
+the operator to pull it before retrying.
+
+Legacy cleanup fixtures use exact mode `0700`, verified before startup together
+with ownership, group, link count and emptiness. The Jupyter base sets setgid on
+home directories; GNU `chmod 0700` and `install -m 0700` preserve that bit and
+can accidentally seed `02700`, which CW correctly refuses. The harness uses
+`00700` to clear special bits only in its disposable fixtures. It does not
+change production cleanup or relax CW's retained-state checks.
+
 The `contract` mode invoked by the publication workflow does not run this
 lifecycle harness. A green candidate build/scan therefore needs this separate
 HTTP startup/upgrade receipt before the course advances `release`.
