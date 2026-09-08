@@ -385,6 +385,24 @@ distribution metadata, and requires every packaged exercise bundle to pass the
 Hub-mode image-ownership check, match its catalog digest, and verify as a
 complete Git bundle.
 
+The contract also runs the frontend guard tests against the image's installed
+Jupyter runtime, without an external network or CW backend. Both plain ServerApp
+and the real JupyterHub single-user entrypoint (using a loopback mock Hub) must
+serve health metadata while denying Lab, tree, and resource APIs. An explicit
+Lab launcher must stop with an error. These tests do not replace the exact-image
+lifecycle receipt or a real Hub acceptance run.
+
+Both launcher paths must start plain Jupyter Server:
+`DOCKER_STACKS_JUPYTER_CMD=server` controls standalone `start-notebook.py`, while
+`JUPYTERHUB_SINGLEUSER_APP=jupyter_server.serverapp.ServerApp` controls Hub
+startup. Without the former, Docker Stacks defaults to `jupyter lab`; that
+launcher explicitly enables Lab before loading server configuration. Later
+configuration can report `jupyterlab: false` while the extension manager still
+has Lab enabled. CW therefore checks the starter application and actual manager
+state, and makes extension guard failures fatal. Keep the `/lab` denial in the
+lifecycle harness; an authenticated but API-blocked Lab shell is not the
+intended CW-only interface.
+
 The image build guards the CodingWorkspace install itself with
 `verify_installed_source.py`. Before `pip install`, the pristine `git archive`
 of the tracked commit must carry no setuptools output (`build/`, `dist/`,

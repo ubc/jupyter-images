@@ -108,6 +108,7 @@ python3 codingworkspace-notebook/ci/test_update_opencode_release.py -v
 python3 codingworkspace-notebook/ci/test_verify_installed_source.py -v
 python3 codingworkspace-notebook/ci/test_prestop_shutdown_outcome.py -v
 python3 codingworkspace-notebook/ci/test_course_role_environment.py -v
+python3 codingworkspace-notebook/ci/test_jupyter_frontend_guard.py -v
 python3 codingworkspace-notebook/ci/test_smoke_workspace_creation.py -v
 python3 codingworkspace-notebook/ci/test_smoke_legacy_fixture.py -v
 
@@ -375,6 +376,7 @@ for required in \
   'class CodingWorkspaceOnlyAuthorizer' \
   '_allowed = frozenset({("read", "api")})' \
   'c.ServerApp.authorizer_class = CodingWorkspaceOnlyAuthorizer' \
+  'c.ServerApp.reraise_server_extension_failures = True' \
   'c.ServerApp.terminals_enabled = False' \
   '"jupyter_server_proxy": False' \
   '"jupyterlab": False' \
@@ -382,5 +384,8 @@ for required in \
   grep -Fq "$required" <<<"$config_text" \
     || fail "the deny-by-default Jupyter contract is missing $required"
 done
+
+grep -Fq 'DOCKER_STACKS_JUPYTER_CMD=server' "$dockerfile" \
+  || fail "the standalone Docker launcher must start plain Jupyter Server"
 
 echo "Static CodingWorkspace image validation passed."

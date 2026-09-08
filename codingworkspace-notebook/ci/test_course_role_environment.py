@@ -38,6 +38,7 @@ class RoleEnvironmentTests(unittest.TestCase):
             request_headers_override={"X-CodingWorkspace-Proxy-Token": "x" * 48},
             make_proxy_handler=lambda: (object, {}))
         globals_.update(ServerProxyConfig=lambda **_: SimpleNamespace(servers={"codingworkspace": process}),
+                        validate_jupyter_frontends=lambda _: None,
                         url_path_join=lambda *args: "/".join(args), PREVIEW_CAPABILITY_ROUTE="preview",
                         make_preview_proxy_handler=lambda handler: handler, AddSlashHandler=object)
         exec(compile(ast.Module(body=[function], type_ignores=[]), "runtime-extension", "exec"), globals_)

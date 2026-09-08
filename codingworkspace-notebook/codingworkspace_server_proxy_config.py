@@ -248,6 +248,9 @@ c.ServerApp.jpserver_extensions.update(
     }
 )
 c.ServerApp.authorizer_class = CodingWorkspaceOnlyAuthorizer
+# Extension errors otherwise only log a warning and leave the server running,
+# potentially with the forbidden launcher that the CW guard just rejected.
+c.ServerApp.reraise_server_extension_failures = True
 c.ServerApp.terminals_enabled = False
 c.ServerApp.root_dir = "/opt/codingworkspace-jupyter/empty-root"
 c.ServerApp.default_url = "/codingworkspace/"

@@ -145,25 +145,45 @@ def make_preview_proxy_handler(proxy_class: type) -> type:
     return CodingWorkspacePreviewProxy
 
 
-def _load_jupyter_server_extension(server_app: Any) -> None:
-    """Register only CodingWorkspace; never register /proxy/<host>:<port>."""
+def validate_jupyter_frontends(server_app: Any) -> None:
+    """Reject frontend launchers and their actual enabled extension state.
 
-    class_modules = {cls.__module__.partition(".")[0] for cls in type(server_app).mro()}
+    ``jupyter lab`` starts a plain ServerApp, so checking its class alone does
+    not detect the Lab launcher. Jupyter also preserves the launcher's enabled
+    extension in its manager even when later configuration shows it disabled.
+    Check both the starter application and the manager before binding CW.
+    """
+
+    applications = (server_app, getattr(server_app, "_starter_app", None))
+    class_modules = {
+        cls.__module__.partition(".")[0]
+        for application in applications if application is not None
+        for cls in type(application).mro()
+    }
     if class_modules.intersection({"jupyterlab", "notebook"}):
         raise RuntimeError(
             "CodingWorkspace requires plain Jupyter Server; Lab/Notebook apps are forbidden"
         )
 
     extension_states = dict(getattr(server_app, "jpserver_extensions", {}) or {})
+    manager = getattr(server_app, "extension_manager", None)
+    loaded_extensions = dict(getattr(manager, "extensions", {}) or {})
     forbidden_enabled = sorted(
         name
         for name in ("jupyter_server_proxy", "jupyterlab", "notebook", "notebook_shim")
         if extension_states.get(name)
+        or getattr(loaded_extensions.get(name), "enabled", False)
     )
     if forbidden_enabled:
         raise RuntimeError(
             "Forbidden Jupyter extensions are enabled: " + ", ".join(forbidden_enabled)
         )
+
+
+def _load_jupyter_server_extension(server_app: Any) -> None:
+    """Register only CodingWorkspace; never register /proxy/<host>:<port>."""
+
+    validate_jupyter_frontends(server_app)
 
     serverproxy_config = ServerProxyConfig(parent=server_app)
     if set(serverproxy_config.servers) != {"codingworkspace"}:
