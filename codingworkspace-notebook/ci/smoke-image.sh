@@ -649,7 +649,11 @@ if [ -n "$PRIOR_IMAGE" ]; then
     echo "prior image must use an immutable registry digest" >&2
     exit 1
   }
-  docker image inspect "$PRIOR_IMAGE" >/dev/null
+  if ! docker image inspect "$PRIOR_IMAGE" >/dev/null 2>&1; then
+    echo "Prior image is unavailable locally: $PRIOR_IMAGE" >&2
+    echo "Pull this exact digest with docker pull before running the lifecycle smoke." >&2
+    exit 1
+  fi
 fi
 contract "$@"
 namespace_probe
@@ -689,7 +693,7 @@ for volume in "${volumes[@]}"; do
   # drivers. Model the Hub fsGroup/init behavior explicitly before creating
   # mode-0700 student fixtures.
   docker run --rm --user 0 -v "$volume:/home/jovyan" --entrypoint /bin/bash "$IMAGE" -ceu \
-    "chown -R $NB_UID:$NB_GID /home/jovyan; chmod 0700 /home/jovyan"
+    "chown -R $NB_UID:$NB_GID /home/jovyan; chmod 00700 /home/jovyan"
 done
 
 TOKEN="cw-smoke-$suffix-$(printf '%032d' 0)"
@@ -795,8 +799,9 @@ for path in (run_dir / "CodingWorkspace.sqlite3", checkpoints[-1]):
 # Fresh home, exact-empty legacy cleanup, authenticated proxy, denied direct
 # backend access, denied Jupyter APIs, Python user-site shadow resistance,
 # starter creation, and graceful SIGTERM.
+docker run --rm -i -v "$fresh_volume:/home/jovyan" --entrypoint /opt/conda/bin/python "$IMAGE" - \
+  < "$SCRIPT_DIR/smoke_legacy_fixture.py"
 prepare_home "$fresh_volume" '
-  install -d -m 0700 /home/jovyan/cw/run /home/jovyan/cw/run/github-credentials /home/jovyan/cw/run/opencode-auth
   install -d -m 0700 /home/jovyan/.local/lib/python3.13/site-packages/codingworkspace
   printf "%s\n" \
     "from pathlib import Path" \
@@ -870,8 +875,10 @@ if [ -n "$PRIOR_IMAGE" ]; then
   run_verified_prestop "$upgraded_container"
   docker stop --time 15 "$upgraded_container" >/dev/null
   echo "Prior-release retained-home upgrade smoke passed: $PRIOR_IMAGE -> $IMAGE"
+  echo "CW_LIFECYCLE_UPGRADE v=1 status=passed prior=$PRIOR_IMAGE candidate=$IMAGE"
 else
   echo "Prior-release retained-home upgrade was not tested (supply PRIOR_IMAGE_BY_DIGEST)."
+  echo "CW_LIFECYCLE_UPGRADE v=1 status=skipped reason=no-prior-image"
 fi
 
 assert_safe_stale_failure() {
