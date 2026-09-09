@@ -154,6 +154,19 @@ jobs:
             echo "Re-set it as single-line base64; do not store the raw PEM." >&2
             exit 1
           fi
+          # Identify WHICH key arrived. A fingerprint is not secret, and this is
+          # the only way to tell a mangled secret from an unauthorised one: the
+          # structural check above passes for a key that is valid but not the
+          # one registered on the course repository.
+          echo "decoded key: $(wc -c < "$keyfile" | tr -d ' ') bytes, $(ssh-keygen -lf "$keyfile" | awk '{print $1, $2}')"
+          # Ask the server who it thinks we are before attempting the clone. A
+          # deploy key answers with the repository it is registered on, so an
+          # authentication problem is attributed here instead of surfacing as an
+          # opaque git failure. Never fatal on its own.
+          ssh -o IdentitiesOnly=yes -i "$keyfile" \
+              -o UserKnownHostsFile="$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts" \
+              -o StrictHostKeyChecking=yes -o BatchMode=yes \
+              -T git@github.com 2>&1 | head -3 || true
           GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts -o StrictHostKeyChecking=yes" \
             git clone --quiet --no-tags --filter=blob:none --no-checkout \
               git@github.com:kevinlb1/CodingWorkspace.git "$RUNNER_TEMP/cw-receipts"
