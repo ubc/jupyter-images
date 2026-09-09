@@ -268,7 +268,10 @@ COPY --chown=root:root --chmod=0444 codingworkspace-notebook/codingworkspace_ser
 COPY --chown=root:root --chmod=0555 codingworkspace-notebook/codingworkspace_prestop.py \
     /usr/local/sbin/codingworkspace-prestop
 
-ENV JUPYTERHUB_SINGLEUSER_APP=jupyter_server.serverapp.ServerApp \
+# The standalone Docker Stacks launcher defaults to `jupyter lab`; the Hub
+# setting alone only affects start-singleuser.py. Keep both paths on ServerApp.
+ENV DOCKER_STACKS_JUPYTER_CMD=server \
+    JUPYTERHUB_SINGLEUSER_APP=jupyter_server.serverapp.ServerApp \
     JUPYTERHUB_DISABLE_USER_CONFIG=1 \
     JUPYTERHUB_DEFAULT_URL=/codingworkspace/ \
     JUPYTER_CONFIG_DIR=/opt/codingworkspace-jupyter/config \

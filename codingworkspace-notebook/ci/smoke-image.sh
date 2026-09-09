@@ -563,6 +563,7 @@ PY
       test ! -e /etc/opencode/opencode.json
       test -z "${OPENCODE_CONFIG:-}"
       test "${JUPYTERHUB_SINGLEUSER_APP:-}" = "jupyter_server.serverapp.ServerApp"
+      test "${DOCKER_STACKS_JUPYTER_CMD:-}" = server
       test "${JUPYTER_RUNTIME_DIR:-}" = /tmp/codingworkspace-jupyter-runtime
       test "${PYTHONNOUSERSITE:-}" = 1
       test "${PYTHONSAFEPATH:-}" = 1
@@ -571,6 +572,13 @@ PY
       test "$(stat -c %g "$JUPYTER_RUNTIME_DIR")" = "$(id -g)"
       test "$(stat -c %a "$JUPYTER_RUNTIME_DIR")" = 700
     '
+
+  # No CW backend, student PVC, Hub, or external network is needed to exercise
+  # Jupyter's real extension load order and authenticated route denial.
+  docker run --rm --network none -i \
+    -e CW_JUPYTER_RUNTIME_TEST_ROOT=/opt/codingworkspace-jupyter/runtime \
+    -e CW_JUPYTER_CONFIG_TEST_PATH=/opt/codingworkspace-jupyter/config/jupyter_server_config.py \
+    --entrypoint python "$IMAGE" - -v < "$SCRIPT_DIR/test_jupyter_frontend_guard.py"
 
   local label_cw label_gizmo label_opencode expected_opencode
   local label_builder_ref label_builder_blob label_index label_layer label_runtime label_manifest
@@ -818,7 +826,7 @@ direct_code=$(docker exec "$fresh_container" curl -sS -o /tmp/cw-smoke-direct -w
   "http://127.0.0.1:8768${BASE_URL}codingworkspace/api/bootstrap")
 case "$direct_code" in 401|403) ;; *) echo "direct backend returned $direct_code, expected 401/403" >&2; exit 1;; esac
 
-for route in api/contents api/kernels api/sessions api/terminals lab tree; do
+for route in api/contents api/kernels api/sessions api/terminals lab lab/ lab/tree/test.ipynb tree; do
   code=$(request_code "$fresh_container" "${BASE_URL}${route}" || true)
   case "$code" in 403|404) ;; *) echo "Jupyter route /$route returned $code, expected 403/404" >&2; exit 1;; esac
 done
