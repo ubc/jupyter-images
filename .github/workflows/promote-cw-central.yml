@@ -1,0 +1,326 @@
+name: Promote CodingWorkspace central image
+
+# The course team builds and publishes the central-service image; this workflow
+# admits a chosen digest to the platform registry. We do not rebuild their
+# application: a second copy of their Dockerfile, lock and validator would
+# drift, and would make us the provenance authority for code we do not write.
+#
+# The copy preserves the exact index digest, so their build's provenance and
+# attestation manifests survive and the promoted reference stays traceable to
+# their run. Verified with crane against a live registry before this was
+# written; a naive docker pull/tag/push instead flattens to one platform and
+# silently drops the attestation manifest.
+#
+# THE DESTINATION PACKAGE MUST STAY PRIVATE. It carries the course team's
+# private application. GHCR visibility is per-package and new packages are
+# private by default, but GitHub documents that "once you make a package
+# public, you cannot make it private again" — so privacy is CHECKED here
+# before and after the copy, never assumed. An organisation-level Package
+# Creation setting can also constrain what members may create, so before the
+# very FIRST publishing run for a package that does not exist yet, an owner
+# should confirm ubc's Package Creation setting: that first push is the one
+# moment these guards cannot pre-verify.
+#
+# Promotion is NOT activation. It moves an artifact between registries. Student
+# enablement still needs the course team's live integration checks and this
+# side's cluster gates.
+
+on:
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: Index digest to promote, exactly as the course receipt records it (sha256:...)
+        required: true
+        type: string
+      receipt_ref:
+        description: CodingWorkspace commit holding the staging receipt for that digest
+        required: true
+        type: string
+      publish:
+        description: Copy to the platform registry (false verifies only, changing nothing)
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-cw-central-${{ inputs.digest }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Verify and promote
+    if: >-
+      github.repository == 'ubc/jupyter-images' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same protected environment as the review build: publishing a central
+    # image is one trust boundary, and its independent-reviewer requirement is
+    # what makes a requested digest a reviewed digest.
+    environment: codingworkspace-central-publication
+    permissions:
+      contents: read
+      packages: write
+    env:
+      SOURCE_REPOSITORY: ghcr.io/kevinlb1/codingworkspace-central
+      SOURCE_URL: https://github.com/kevinlb1/CodingWorkspace
+      DESTINATION_REPOSITORY: ghcr.io/ubc/codingworkspace-central
+      DESTINATION_ORG: ubc
+      DESTINATION_PACKAGE: codingworkspace-central
+      CRANE_VERSION: v0.22.1
+      CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+      DIGEST: ${{ inputs.digest }}
+      RECEIPT_REF: ${{ inputs.receipt_ref }}
+    steps:
+      - name: Require the protected independent review environment
+        env:
+          POLICY_ACK: ${{ vars.CODINGWORKSPACE_CENTRAL_POLICY_ACK }}
+        run: test "$POLICY_ACK" = main-only-independent-review-no-admin-bypass-v1
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Validate the requested references
+        run: |
+          set -euo pipefail
+          python3 -c 'import os,re,sys; sys.exit(0) if re.fullmatch("sha256:[0-9a-f]{64}", os.environ["DIGEST"]) else sys.exit("digest must be an immutable sha256 digest, never a tag")'
+          python3 -c 'import os,re,sys; sys.exit(0) if re.fullmatch("[0-9a-f]{40}", os.environ["RECEIPT_REF"]) else sys.exit("receipt_ref must be a full 40-hex commit, so the receipt cannot move under review")'
+
+      # GUARD 1 of 2 on visibility. Runs BEFORE anything is copied, so an
+      # already-public destination stops the run while it is still harmless.
+      - name: Refuse to add a digest to a destination package that is not private
+        if: inputs.publish == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if visibility=$(gh api "orgs/$DESTINATION_ORG/packages/container/$DESTINATION_PACKAGE" \
+                            --jq '.visibility' 2>/dev/null); then
+            echo "destination package exists with visibility: $visibility"
+            if [ "$visibility" != private ]; then
+              echo "REFUSING TO PROMOTE: $DESTINATION_REPOSITORY is '$visibility', not private." >&2
+              echo "It carries the course team's private application. Making a package public is" >&2
+              echo "not reversible on GitHub, so this needs a human decision, not a retry." >&2
+              exit 1
+            fi
+          else
+            echo "destination package does not exist yet."
+            echo "This first push relies on GitHub's documented private-by-default behaviour."
+            echo "Confirm ubc's organisation Package Creation setting before trusting it."
+          fi
+
+      - name: Install crane at a pinned, checksum-verified version
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/crane.tgz"
+          curl --fail --silent --show-error --location -o "$archive" \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "$CRANE_SHA256  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" crane
+          rm -f "$archive"
+          "$RUNNER_TEMP/crane" version
+
+      - name: Read the course staging receipt with the read-only deploy key
+        env:
+          CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$CW_DEPLOY_KEY"
+          keyfile="$RUNNER_TEMP/cw-promotion-deploy-key"
+          trap 'rm -f "$keyfile"' EXIT
+          umask 077
+          printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
+          GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts -o StrictHostKeyChecking=yes" \
+            git clone --quiet --no-tags --filter=blob:none --no-checkout \
+              git@github.com:kevinlb1/CodingWorkspace.git "$RUNNER_TEMP/cw-receipts"
+          git -C "$RUNNER_TEMP/cw-receipts" checkout --quiet --detach "$RECEIPT_REF"
+          # Exactly one receipt in that commit may vouch for this digest.
+          # Zero means the wrong ref; more than one means ambiguous provenance.
+          mapfile -t matches < <(grep -rl --include=staging-receipt.json -F "$DIGEST" \
+            "$RUNNER_TEMP/cw-receipts/deploy/ltic-media-activation/staging" || true)
+          if [ "${#matches[@]}" -ne 1 ]; then
+            echo "expected exactly one staging receipt naming $DIGEST at $RECEIPT_REF, found ${#matches[@]}" >&2
+            exit 1
+          fi
+          cp "${matches[0]}" "$RUNNER_TEMP/course-receipt.json"
+          printf '%s\n' "${matches[0]#$RUNNER_TEMP/cw-receipts/}" > "$RUNNER_TEMP/course-receipt-path.txt"
+          rm -rf "$RUNNER_TEMP/cw-receipts"
+
+      - name: Verify the receipt vouches for this digest
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cp "$RUNNER_TEMP/course-receipt.json" evidence/course-staging-receipt.json
+          python3 codingworkspace-central/verify_promotion.py receipt \
+            --receipt "$RUNNER_TEMP/course-receipt.json" \
+            --digest "$DIGEST" \
+            --expect-repository "$SOURCE_REPOSITORY" \
+            --write-source-commit "$RUNNER_TEMP/source-commit.txt"
+          printf 'SOURCE_COMMIT=%s\n' "$(cat "$RUNNER_TEMP/source-commit.txt")" >> "$GITHUB_ENV"
+
+      # Read and write use SEPARATE credentials and separate registry configs,
+      # even though both sides are ghcr.io: the course package is read with a
+      # token scoped to their namespace, and the platform namespace is written
+      # with this repository's own GITHUB_TOKEN. Neither can do the other's job,
+      # so the pull credential never needs write:packages.
+      - name: Authenticate to the course package for reading only
+        env:
+          PULL_USER: ${{ vars.GHCR_COURSE_PULL_USER }}
+          PULL_TOKEN: ${{ secrets.GHCR_COURSE_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PULL_USER" && test -n "$PULL_TOKEN"
+          mkdir -p "$RUNNER_TEMP/read-config"
+          DOCKER_CONFIG="$RUNNER_TEMP/read-config" "$RUNNER_TEMP/crane" auth login ghcr.io \
+            -u "$PULL_USER" --password-stdin <<< "$PULL_TOKEN"
+
+      - name: Re-derive the image's claims from the registry
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/read-config"
+          "$RUNNER_TEMP/crane" manifest "$SOURCE_REPOSITORY@$DIGEST" > evidence/source-index.json
+          "$RUNNER_TEMP/crane" config "$SOURCE_REPOSITORY@$DIGEST" > evidence/source-config.json
+          python3 codingworkspace-central/verify_promotion.py image \
+            --manifest evidence/source-index.json \
+            --config evidence/source-config.json \
+            --source-commit "$SOURCE_COMMIT" \
+            --expect-source "$SOURCE_URL"
+
+      - name: Apply this side's vulnerability policy to the exact digest
+        env:
+          PULL_USER: ${{ vars.GHCR_COURSE_PULL_USER }}
+          PULL_TOKEN: ${{ secrets.GHCR_COURSE_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Their scan result is evidence, not our decision. Re-scan here so the
+          # policy that admits an image is the one this platform enforces.
+          export DOCKER_CONFIG="$RUNNER_TEMP/read-config"
+          echo "$PULL_TOKEN" | docker login ghcr.io -u "$PULL_USER" --password-stdin
+          docker pull --platform linux/amd64 "$SOURCE_REPOSITORY@$DIGEST"
+          docker tag "$SOURCE_REPOSITORY@$DIGEST" local/codingworkspace-central:promote
+          codingworkspace-notebook/ci/scan-local-image.sh local/codingworkspace-central:promote evidence
+
+      - name: Fetch the full index into an OCI layout
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/read-config"
+          # --format=oci keeps every referenced manifest, including the
+          # attestation manifests, so the push below reproduces the index at
+          # the same digest.
+          "$RUNNER_TEMP/crane" pull --format=oci "$SOURCE_REPOSITORY@$DIGEST" "$RUNNER_TEMP/oci-layout"
+
+      - name: Discard the read credential before writing
+        run: |
+          rm -rf "$RUNNER_TEMP/read-config"
+          docker logout ghcr.io || true
+
+      - name: Promote to the platform registry
+        if: inputs.publish == true
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/write-config"
+          export DOCKER_CONFIG="$RUNNER_TEMP/write-config"
+          "$RUNNER_TEMP/crane" auth login ghcr.io -u "$ACTOR" --password-stdin <<< "$GHCR_TOKEN"
+          tag="promoted-${SOURCE_COMMIT}-r${GITHUB_RUN_ID}-a${GITHUB_RUN_ATTEMPT}"
+          printf '%s\n' "$tag" > evidence/promoted-tag.txt
+          "$RUNNER_TEMP/crane" push "$RUNNER_TEMP/oci-layout" "$DESTINATION_REPOSITORY:$tag"
+
+      # GUARD 2 of 2. The first push to a brand-new package cannot be
+      # pre-verified, so confirm the result immediately and fail the run if the
+      # artifact is exposed, rather than leaving it to be noticed later.
+      - name: Assert the promoted package is private
+        if: inputs.publish == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          visibility=$(gh api "orgs/$DESTINATION_ORG/packages/container/$DESTINATION_PACKAGE" --jq '.visibility')
+          printf '%s\n' "$visibility" > evidence/destination-visibility.txt
+          echo "promoted package visibility: $visibility"
+          if [ "$visibility" != private ]; then
+            echo "EXPOSURE: $DESTINATION_REPOSITORY is '$visibility' after promotion." >&2
+            echo "The course team's private application is now readable beyond this org, and" >&2
+            echo "GitHub does not allow reverting a public package to private. Treat this as an" >&2
+            echo "incident: notify the course team, and delete the package version if the" >&2
+            echo "exposure window matters." >&2
+            exit 1
+          fi
+
+      - name: Verify the promoted copy kept its digest and every manifest
+        if: inputs.publish == true
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/write-config"
+          tag=$(cat evidence/promoted-tag.txt)
+          "$RUNNER_TEMP/crane" manifest "$DESTINATION_REPOSITORY:$tag" > evidence/destination-index.json
+          destination_digest=$("$RUNNER_TEMP/crane" digest "$DESTINATION_REPOSITORY:$tag")
+          python3 codingworkspace-central/verify_promotion.py destination \
+            --manifest evidence/source-index.json \
+            --destination-manifest evidence/destination-index.json \
+            --digest "$DIGEST" --destination-digest "$destination_digest"
+
+      - name: Record the admission receipt
+        if: inputs.publish == true
+        run: |
+          set -euo pipefail
+          python3 codingworkspace-central/verify_promotion.py admission-receipt \
+            --digest "$DIGEST" \
+            --source-repository "$SOURCE_REPOSITORY" \
+            --destination-repository "$DESTINATION_REPOSITORY" \
+            --tag "$(cat evidence/promoted-tag.txt)" \
+            --source-commit "$SOURCE_COMMIT" \
+            --course-receipt-path "$(cat "$RUNNER_TEMP/course-receipt-path.txt")" \
+            --workflow-commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --output evidence/admission-receipt.json
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          root = Path('evidence')
+          files = sorted(p for p in root.iterdir() if p.is_file() and p.name != 'SHA256SUMS')
+          (root / 'SHA256SUMS').write_text(''.join(
+              f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files))
+          PY
+
+      - name: Summarise
+        if: always()
+        env:
+          PUBLISHED: ${{ inputs.publish }}
+        run: |
+          {
+            printf '### CodingWorkspace central promotion\n\n'
+            printf -- '- Requested digest: `%s`\n' "$DIGEST"
+            printf -- '- Source commit: `%s`\n' "${SOURCE_COMMIT:-unresolved}"
+            printf -- '- Published: `%s`\n' "$PUBLISHED"
+            if [ -f evidence/promoted-tag.txt ]; then
+              printf -- '- Promoted as: `%s@%s`\n' "$DESTINATION_REPOSITORY" "$DIGEST"
+              printf -- '- Human tag: `%s`\n' "$(cat evidence/promoted-tag.txt)"
+            fi
+            if [ -f evidence/destination-visibility.txt ]; then
+              printf -- '- Destination visibility: `%s`\n' "$(cat evidence/destination-visibility.txt)"
+            fi
+            printf -- '\nPromotion is registry admission only. It is not student activation.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: central-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove credentials and staged layers even on failure
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/read-config" "$RUNNER_TEMP/write-config" \
+            "$RUNNER_TEMP/oci-layout" "$RUNNER_TEMP/cw-receipts" \
+            "$RUNNER_TEMP/cw-promotion-deploy-key" "$RUNNER_TEMP/course-receipt.json"
+          docker logout ghcr.io || true
