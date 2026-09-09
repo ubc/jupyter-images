@@ -12,14 +12,17 @@ name: Promote CodingWorkspace central image
 # silently drops the attestation manifest.
 #
 # THE DESTINATION PACKAGE MUST STAY PRIVATE. It carries the course team's
-# private application. GHCR visibility is per-package and new packages are
-# private by default, but GitHub documents that "once you make a package
-# public, you cannot make it private again" — so privacy is CHECKED here
-# before and after the copy, never assumed. An organisation-level Package
-# Creation setting can also constrain what members may create, so before the
-# very FIRST publishing run for a package that does not exist yet, an owner
-# should confirm ubc's Package Creation setting: that first push is the one
-# moment these guards cannot pre-verify.
+# private application, so privacy is checked before AND after the copy, never
+# assumed.
+#
+# Do not trust GitHub's documented private-by-default for new packages. Run
+# 34337275146 pushed to a package that did not exist and GitHub created it
+# PUBLIC: the private course image, layers included, was anonymously pullable
+# until a human changed the visibility. This organisation permits public
+# package creation, which appears to take precedence. A post-push check cannot
+# prevent that, only report it — so a nonexistent destination is refused unless
+# allow_package_creation is set deliberately, and the safe path is to create
+# the package private by hand and never set it.
 #
 # Promotion is NOT activation. It moves an artifact between registries. Student
 # enablement still needs the course team's live integration checks and this
@@ -39,6 +42,14 @@ on:
       publish:
         description: Copy to the platform registry (false verifies only, changing nothing)
         required: true
+        type: boolean
+        default: false
+      allow_package_creation:
+        description: >-
+          Permit the FIRST push, creating the destination package. Leave false unless
+          the package has been created private by hand. GitHub created it PUBLIC in
+          run 34337275146 despite documenting private-by-default.
+        required: false
         type: boolean
         default: false
 
@@ -95,27 +106,50 @@ jobs:
           python3 -c 'import os,re,sys; sys.exit(0) if re.fullmatch("[0-9a-f]{40}", os.environ["RECEIPT_REF"]) else sys.exit("receipt_ref must be a full 40-hex commit, so the receipt cannot move under review")'
           printf 'requested digest: %s\nreceipt ref: %s\n' "$DIGEST" "$RECEIPT_REF" > evidence/request.txt
 
-      # GUARD 1 of 2 on visibility. Runs BEFORE anything is copied, so an
-      # already-public destination stops the run while it is still harmless.
-      - name: Refuse to add a digest to a destination package that is not private
+      # Runs BEFORE anything is copied, so a destination that is not private
+      # stops the run while that is still harmless.
+      #
+      # A post-push assertion can only DETECT an exposure; it cannot prevent
+      # one. Run 34337275146 proved that the hard way: the destination package
+      # did not exist, this step waved it through on GitHub's documented
+      # private-by-default behaviour, and GitHub created it PUBLIC. The course
+      # team's private application was anonymously pullable -- layers included
+      # -- until a human changed the visibility by hand. The organisation
+      # permits public package creation, which appears to override that default.
+      #
+      # So a nonexistent destination is now a REFUSAL, not an assumption. The
+      # only way to create the package is to opt in explicitly, and the safe
+      # path is to create it private by hand first and never opt in at all.
+      - name: Refuse to promote unless the destination package exists and is private
         if: inputs.publish == true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALLOW_CREATION: ${{ inputs.allow_package_creation }}
         run: |
           set -euo pipefail
           if visibility=$(gh api "orgs/$DESTINATION_ORG/packages/container/$DESTINATION_PACKAGE" \
                             --jq '.visibility' 2>/dev/null); then
             echo "destination package exists with visibility: $visibility"
+            printf 'destination visibility before promotion: %s\n' "$visibility" \
+              >> evidence/request.txt
             if [ "$visibility" != private ]; then
               echo "REFUSING TO PROMOTE: $DESTINATION_REPOSITORY is '$visibility', not private." >&2
-              echo "It carries the course team's private application. Making a package public is" >&2
-              echo "not reversible on GitHub, so this needs a human decision, not a retry." >&2
+              echo "It carries the course team's private application, so this needs a human" >&2
+              echo "decision, not a retry." >&2
               exit 1
             fi
+          elif [ "$ALLOW_CREATION" = true ]; then
+            echo "destination package does not exist; creating it because" \
+                 "allow_package_creation was set explicitly."
+            echo "WARNING: GitHub created this package PUBLIC in run 34337275146 under the" >&2
+            echo "same organisation settings. Watch the post-push assertion, and be ready to" >&2
+            echo "change visibility immediately." >&2
           else
-            echo "destination package does not exist yet."
-            echo "This first push relies on GitHub's documented private-by-default behaviour."
-            echo "Confirm ubc's organisation Package Creation setting before trusting it."
+            echo "REFUSING TO PROMOTE: $DESTINATION_REPOSITORY does not exist yet." >&2
+            echo "Creating it by pushing is how run 34337275146 published a private course" >&2
+            echo "image publicly. Create the package private by hand first, then re-run." >&2
+            echo "Set allow_package_creation=true only to accept that risk deliberately." >&2
+            exit 1
           fi
 
       - name: Install crane at a pinned, checksum-verified version
