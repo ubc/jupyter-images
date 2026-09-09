@@ -131,11 +131,9 @@ jobs:
 
       - name: Read the course staging receipt with the read-only deploy key
         env:
-          # Base64, single line, NOT the raw PEM. A multi-line private key did
-          # not survive the round trip into an Actions secret here: run
-          # 34335016585 failed with "Permission denied (publickey)" using a key
-          # that authenticates correctly outside CI, so the newlines were lost
-          # somewhere in transit. Base64 removes the whole failure class.
+          # Single-line base64 rather than the raw PEM. This is defence against
+          # multi-line secrets being fragile in transit, not the fix for the
+          # earlier publickey failures -- see the export below for that.
           # Produce the secret with:
           #   vault kv get -field=cw-deploy-key secret/jupyter/prod/ai100 | base64
           CW_DEPLOY_KEY_B64: ${{ secrets.CW_DEPLOY_KEY_B64 }}
@@ -147,29 +145,24 @@ jobs:
           umask 077
           printf '%s' "$CW_DEPLOY_KEY_B64" | base64 -d > "$keyfile"
           chmod 600 "$keyfile"
-          # Fail on a mangled secret HERE, with a message that says so, rather
-          # than several lines later as an opaque publickey denial.
           if ! ssh-keygen -lf "$keyfile" >/dev/null 2>&1; then
             echo "CW_DEPLOY_KEY_B64 did not decode to a usable SSH private key." >&2
             echo "Re-set it as single-line base64; do not store the raw PEM." >&2
             exit 1
           fi
-          # Identify WHICH key arrived. A fingerprint is not secret, and this is
-          # the only way to tell a mangled secret from an unauthorised one: the
-          # structural check above passes for a key that is valid but not the
-          # one registered on the course repository.
-          echo "decoded key: $(wc -c < "$keyfile" | tr -d ' ') bytes, $(ssh-keygen -lf "$keyfile" | awk '{print $1, $2}')"
-          # Ask the server who it thinks we are before attempting the clone. A
-          # deploy key answers with the repository it is registered on, so an
-          # authentication problem is attributed here instead of surfacing as an
-          # opaque git failure. Never fatal on its own.
-          ssh -o IdentitiesOnly=yes -i "$keyfile" \
-              -o UserKnownHostsFile="$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts" \
-              -o StrictHostKeyChecking=yes -o BatchMode=yes \
-              -T git@github.com 2>&1 | head -3 || true
-          GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts -o StrictHostKeyChecking=yes" \
-            git clone --quiet --no-tags --filter=blob:none --no-checkout \
-              git@github.com:kevinlb1/CodingWorkspace.git "$RUNNER_TEMP/cw-receipts"
+          # A fingerprint is not secret, and it distinguishes a valid key from
+          # the RIGHT key when authentication fails.
+          echo "deploy key: $(ssh-keygen -lf "$keyfile" | awk '{print $1, $2}')"
+          # EXPORTED, not prefix-assigned to the clone. The clone below is
+          # blobless, so the checkout that follows is a NETWORK operation
+          # against the promisor remote -- a prefix assignment would leave it
+          # with no credential, which is what failed runs 34335016585 and
+          # 34335925667 with "Permission denied (publickey)" on a key that was
+          # never actually wrong. It passes unnoticed on a workstation, where
+          # an ambient ssh-agent silently supplies the missing identity.
+          export GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts -o StrictHostKeyChecking=yes"
+          git clone --quiet --no-tags --filter=blob:none --no-checkout \
+            git@github.com:kevinlb1/CodingWorkspace.git "$RUNNER_TEMP/cw-receipts"
           git -C "$RUNNER_TEMP/cw-receipts" checkout --quiet --detach "$RECEIPT_REF"
           # Exactly one receipt in that commit may vouch for this digest.
           # Zero means the wrong ref; more than one means ambiguous provenance.
