@@ -1,35 +1,57 @@
-# Central media image: a concrete first build for issue #26
+# Central images: staging promotion and packaging review
 
-The course-control and typed-media services already exist in CodingWorkspace.
-This dedicated workflow makes their first image review possible before LTIC
-has selected its token-verifier package. It builds the real course source,
-Python/Postgres runtime, and console entrypoints; it does not substitute a
-mock API or invent an issuer. No student media flag or Hub profile is changed.
+The course builds and publishes the central application image. Its native Hub
+verifier now ships in the application wheel; deployment does not wait for LTIC
+to choose a signer or verifier package, or for the course to package an adapter.
+LTIC deploys by admitting that published image through
+[Promote CodingWorkspace central image](../.github/workflows/promote-cw-central.yml).
+The separate review-build workflow below is for packaging inspection only.
 
-## Two acceptance stages
+## Current staging deployment path
 
-1. **This PR: image review.** Build an exact source commit, verify the installed
-   package file for file, smoke under UID 10001 with a read-only filesystem and
-   no network, and scan the exact image. The image has no verifier; both
-   production verifier loaders must refuse authentication. Its label and
-   receipt explicitly say `blocked-pending-reviewed-verifier`. There is no
-   moving tag, deployment, or student-activation receipt.
-2. **After LTIC names the issuer interface: authenticated activation.** Course
-   staff implement/package the adapter. Use CodingWorkspace's existing
-   `deploy/kubernetes/central-service-image/` production recipe and its complete
-   verifier-inclusive lock, then publish and retest that different digest.
-   LTIC supplies verifier material only at runtime, installs the services and
-   routes, and supplies paired preview identities. The course runs the real
-   six-model Newcastle smoke and the identity/rotation, Postgres, isolation,
-   retention and recovery gates before requesting student enablement.
+1. Select the exact course-published digest and its receipt from the private
+   [course staging handoff](https://github.com/kevinlb1/CodingWorkspace/blob/main/deploy/ltic-media-activation/STAGING_IMAGE.md).
+   Use the full commit holding that receipt as the promotion workflow's
+   `receipt_ref`; do not substitute a moving tag or a review-build receipt.
+2. Run the promotion workflow's admission checks. It verifies the receipt,
+   source revision, runtime identity and attestation manifests, rejects the
+   review-image label, and applies LTIC's vulnerability policy. Publication
+   copies the existing image index and preserves its digest and attestations;
+   it does not rebuild the application. Keep the destination package private
+   and leave `allow_package_creation=false`.
+3. Pin the admitted digest in LTIC's staging workloads and migration Jobs.
+   Supply the agreed runtime identity, database and secret configuration through
+   LTIC's deployment mechanisms. The course and LTIC then complete the live
+   Hub, media, database-role, isolation and recovery checks before student
+   enablement. A registry admission receipt is not an activation receipt.
 
-A review image cannot be passed off as the second stage. The production
-recipe's required verifier wheel and all feature defaults are unchanged.
-Its migration/real-cluster readiness tests are not replaced by this image smoke.
+The private staging handoff owns the selected image, configuration and remaining
+integration gates. Neither this README nor the review workflow changes student
+media flags or Hub profiles.
 
-## What LTIC needs to configure for the first build
+## Separate packaging review build
 
-- Merge this PR, then create environment `codingworkspace-central-publication`,
+[Build CodingWorkspace central media review image](../.github/workflows/build-cw-central.yml)
+builds an exact source commit, verifies the installed package file for file,
+smokes under UID 10001 with a read-only filesystem and no network, and scans the
+exact image. It deliberately leaves production verifier settings unconfigured;
+its smoke confirms that the verifier loaders refuse that missing configuration.
+Its image label and receipt retain `blocked-pending-reviewed-verifier` to mark
+this non-deployable artifact. That marker does not describe the current
+course-published staging image or a missing LTIC implementation.
+
+Do not deploy or promote `Dockerfile.review` output, even when its selected
+source includes the native verifier. The promotion gate rejects the review
+label. Use the course-published image and receipt for staging; review smoke
+does not replace migration or real-cluster readiness tests.
+
+## Optional review-build setup
+
+The following procedure configures the optional review build. Promotion uses
+the same protected environment, with its own workflow's credentials and checks;
+it does not require a review build or the optional ECR setup below.
+
+- Ensure environment `codingworkspace-central-publication` exists,
   restrict it to `main`, require an independent reviewer, prevent self-review,
   and disable administrator bypass. The reviewer checks the requested full
   CodingWorkspace SHA and the dependency/base pins before approving each run.
