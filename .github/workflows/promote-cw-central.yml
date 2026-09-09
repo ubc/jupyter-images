@@ -87,8 +87,13 @@ jobs:
       - name: Validate the requested references
         run: |
           set -euo pipefail
+          # Created up front, not beside the first artifact: the upload runs on
+          # always(), so a missing directory turns one real failure into a
+          # second, misleading "no files were found" error (run 34335016585).
+          mkdir -p evidence
           python3 -c 'import os,re,sys; sys.exit(0) if re.fullmatch("sha256:[0-9a-f]{64}", os.environ["DIGEST"]) else sys.exit("digest must be an immutable sha256 digest, never a tag")'
           python3 -c 'import os,re,sys; sys.exit(0) if re.fullmatch("[0-9a-f]{40}", os.environ["RECEIPT_REF"]) else sys.exit("receipt_ref must be a full 40-hex commit, so the receipt cannot move under review")'
+          printf 'requested digest: %s\nreceipt ref: %s\n' "$DIGEST" "$RECEIPT_REF" > evidence/request.txt
 
       # GUARD 1 of 2 on visibility. Runs BEFORE anything is copied, so an
       # already-public destination stops the run while it is still harmless.
@@ -126,14 +131,29 @@ jobs:
 
       - name: Read the course staging receipt with the read-only deploy key
         env:
-          CW_DEPLOY_KEY: ${{ secrets.CW_DEPLOY_KEY }}
+          # Base64, single line, NOT the raw PEM. A multi-line private key did
+          # not survive the round trip into an Actions secret here: run
+          # 34335016585 failed with "Permission denied (publickey)" using a key
+          # that authenticates correctly outside CI, so the newlines were lost
+          # somewhere in transit. Base64 removes the whole failure class.
+          # Produce the secret with:
+          #   vault kv get -field=cw-deploy-key secret/jupyter/prod/ai100 | base64
+          CW_DEPLOY_KEY_B64: ${{ secrets.CW_DEPLOY_KEY_B64 }}
         run: |
           set -euo pipefail
-          test -n "$CW_DEPLOY_KEY"
+          test -n "$CW_DEPLOY_KEY_B64"
           keyfile="$RUNNER_TEMP/cw-promotion-deploy-key"
           trap 'rm -f "$keyfile"' EXIT
           umask 077
-          printf '%s\n' "$CW_DEPLOY_KEY" > "$keyfile"
+          printf '%s' "$CW_DEPLOY_KEY_B64" | base64 -d > "$keyfile"
+          chmod 600 "$keyfile"
+          # Fail on a mangled secret HERE, with a message that says so, rather
+          # than several lines later as an opaque publickey denial.
+          if ! ssh-keygen -lf "$keyfile" >/dev/null 2>&1; then
+            echo "CW_DEPLOY_KEY_B64 did not decode to a usable SSH private key." >&2
+            echo "Re-set it as single-line base64; do not store the raw PEM." >&2
+            exit 1
+          fi
           GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o UserKnownHostsFile=$GITHUB_WORKSPACE/codingworkspace-notebook/ci/github_known_hosts -o StrictHostKeyChecking=yes" \
             git clone --quiet --no-tags --filter=blob:none --no-checkout \
               git@github.com:kevinlb1/CodingWorkspace.git "$RUNNER_TEMP/cw-receipts"
@@ -153,7 +173,6 @@ jobs:
       - name: Verify the receipt vouches for this digest
         run: |
           set -euo pipefail
-          mkdir -p evidence
           cp "$RUNNER_TEMP/course-receipt.json" evidence/course-staging-receipt.json
           python3 codingworkspace-central/verify_promotion.py receipt \
             --receipt "$RUNNER_TEMP/course-receipt.json" \
