@@ -105,6 +105,7 @@ python3 codingworkspace-notebook/ci/test_verify_cw_candidate.py -v
 python3 codingworkspace-notebook/ci/test_prepare_git_blob_context.py -v
 python3 codingworkspace-notebook/ci/test_dependency_contract.py -v
 python3 codingworkspace-notebook/ci/test_update_opencode_release.py -v
+python3 codingworkspace-notebook/ci/test_prepare_opencode_proposal.py -v
 python3 codingworkspace-notebook/ci/test_verify_installed_source.py -v
 python3 codingworkspace-notebook/ci/test_prestop_shutdown_outcome.py -v
 python3 codingworkspace-notebook/ci/test_course_role_environment.py -v

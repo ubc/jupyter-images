@@ -69,6 +69,15 @@ same-repository PR, dispatches non-secret validation for that exact branch,
 merges that exact head subject to branch protection, explicitly dispatches the
 protected-`main` publication, and waits for it to finish.
 
+If repository policy forbids GitHub Actions from creating pull requests, the
+workflow reports the update as deferred in its job summary and notice, with a
+compare link for a maintainer. It retains the verified proposal branch without
+merging pins, dispatching a build, or changing an image tag. Later runs reuse an
+orphan branch only when it contains exactly the freshly verified OpenCode pin
+change; they never force-push it. Other permission, network, push, and validation
+errors still fail the run. This optional updater does not block building the
+currently reviewed runtime for a course deployment.
+
 After that automation PR reaches `main`, the hardened job still builds the
 exact image, runs the full image contract, produces an SBOM and all-severity
 vulnerability report, and enforces the fixable-CRITICAL gate. Only then may
@@ -670,6 +679,7 @@ runbook.
 | Dependency manifest export and final build differ | Resolution or cache input changed between the two phases; publication stops. Re-run from reviewed inputs and investigate the exact manifests; never relabel a different artifact |
 | Pod is scheduled on a non-amd64 node | Profile regression: preserve existing selectors and add `kubernetes.io/arch: amd64`, or constrain the eligible node pool and record LTIC's attestation |
 | Tracker push loses a race | No force/rebase is used; the next scheduled run retries from fresh `main` |
+| OpenCode update is deferred by repository policy | The job summary links the retained proposal branch. A maintainer can open the PR if desired; changing the bot-PR policy is optional and current pinned-runtime builds can proceed |
 | OpenCode update PR is not merged | Inspect its dispatched validation and branch-protection requirements; the next schedule revalidates and retries the exact open PR head |
 | No eligible OpenCode update is proposed | Expected while newer stable releases are inside the 48-hour soak, lack both required published digests/assets, or are not newer than the pin |
 | OpenCode automation build fails | Preview remains on the prior digest. Fix or quarantine the release; never move the tag forward around a failed gate |
