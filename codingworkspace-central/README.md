@@ -7,6 +7,12 @@ LTIC deploys by admitting that published image through
 [Promote CodingWorkspace central image](../.github/workflows/promote-cw-central.yml).
 The separate review-build workflow below is for packaging inspection only.
 
+For the September 10 media rollout, use the
+[pinned database-authority rollout checklist](ROLLOUT_DATABASE_MEDIA.md).
+It replaces recurring LTIC worker-registry updates with a course-managed HTTPS
+API and PostgreSQL authorization. The actual LTIC deployment manifests are
+maintained separately; merging these instructions does not deploy a service.
+
 ## Current staging deployment path
 
 1. Select the exact course-published digest and its receipt from the private
