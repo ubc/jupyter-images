@@ -111,6 +111,42 @@ test an ordinary coding turn plus media generation/artifact retrieval. Initial
 control policy must arrive before new coding turns are enabled. After that test,
 enable new student spawns; preserve running lab pods until a coordinated restart.
 
+## 5. Enable private instructor logs in the same rollout
+
+The pinned central image and student 1.0.22 already include the diagnostics
+receiver/client. The media-authority migration alone does **not** enable log
+collection. To give instructors course-wide debugging access, run with the
+migration-owner's existing collaboration settings:
+
+```bash
+python -m codingworkspace.support_diagnostics migrate
+```
+
+Apply the course checkout's
+`deploy/kubernetes/central-services/postgres-support-diagnostics-grants.sql`
+with `target_database`, `target_schema`, `migration_owner`, and `api_runtime`,
+after the base grant policies. Schedule this fixed command daily using the
+control API role's existing settings:
+
+```bash
+python -m codingworkspace.support_diagnostics purge
+```
+
+Connected student pods report bounded, redacted log tails, preview states and
+available memory/throttling/OOM counters during normal control synchronization
+(normally every 60 seconds). Instructors read them in Admin → Central Control →
+Instructor diagnostics. Reads are authenticated and audited; students cannot
+read other students' reports. The course will verify an actual instructor read
+and student rejection after connection. No logs become public.
+
+These are recent pod snapshots, not a full historical log archive or Kubernetes
+monitoring. Hub spawn delays, cluster resource metrics and pods too unhealthy
+to report still require LTIC's operator tools. Media can be activated before
+this step completes, but course-wide log access must not be reported as working
+until a real snapshot and authorized read have succeeded.
+
+[Exact collection limits, grants and instructor API](https://github.com/kevinlb1/CodingWorkspace/blob/3f21730ba5874af7546d53a3d26af382166cb917/deploy/ltic-media-activation/INSTRUCTOR_DIAGNOSTICS.md).
+
 ## Course-owned follow-up
 
 Course staff own publisher enrollment/renewal/revocation, worker credentials,
