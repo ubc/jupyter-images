@@ -67,8 +67,14 @@ CODINGWORKSPACE_CENTRAL_MEDIA_WORKER_EXPECTED_AUDIENCE=codingworkspace-media-wor
 CODINGWORKSPACE_MEDIA_WORKER_AUTH_BACKEND=database
 ```
 
-Remove `CODINGWORKSPACE_MEDIA_WORKER_REGISTRY_FILE`, its registry mount and any
-registry-refresher container. This backend refuses file fallback. Control and
+**Atomically in that same workload rollout**, remove
+`CODINGWORKSPACE_MEDIA_WORKER_REGISTRY_FILE`, its registry mount and any
+registry-refresher container. The existing LTIC chart emits the file setting
+unconditionally through `cw.workerRegistryFile`; remove that config entry as
+well as the mount. Setting `database` first while the file setting remains
+would cause startup failure. The additive migration in step 2 can be installed
+earlier with the default file backend unchanged. Keep the existing factory,
+issuer and audience where already correct. Control and
 all media replicas must use the same primary PostgreSQL database; standby
 verification is refused. Finish the rollout of all replicas before testing.
 
@@ -111,12 +117,25 @@ test an ordinary coding turn plus media generation/artifact retrieval. Initial
 control policy must arrive before new coding turns are enabled. After that test,
 enable new student spawns; preserve running lab pods until a coordinated restart.
 
-## 5. Enable private instructor logs in the same rollout
+## 5. Private instructor logs: separate activation decision
 
 The pinned central image and student 1.0.22 already include the diagnostics
 receiver/client. The media-authority migration alone does **not** enable log
-collection. To give instructors course-wide debugging access, run with the
-migration-owner's existing collaboration settings:
+collection. Media may proceed independently. Before creating the diagnostics
+table (which enables receiver capability), confirm:
+
+- The actual database backup retention, and treatment of snapshots after restore.
+  Live reports expire after seven days; this does not establish when backup copies
+  expire. Record the agreed backup policy before enabling collection.
+- The named LTIC owner for deploying and monitoring the daily purge schedule.
+  Kevin Leyton-Brown is the course owner for debugging and retention decisions;
+  the proposed schedule runs as a Kubernetes CronJob with the API role in the
+  central-service namespace. Course ownership does not grant cluster access.
+
+Kevin has requested private instructor diagnostics. Pan's review approves this
+handoff's accuracy; it is not the separate operational activation signoff.
+Once those points are agreed, run with the migration-owner's existing
+collaboration settings:
 
 ```bash
 python -m codingworkspace.support_diagnostics migrate
@@ -126,11 +145,17 @@ Apply the course checkout's
 `deploy/kubernetes/central-services/postgres-support-diagnostics-grants.sql`
 with `target_database`, `target_schema`, `migration_owner`, and `api_runtime`,
 after the base grant policies. Schedule this fixed command daily using the
-control API role's existing settings:
+control API role's existing settings (not a student pod or personal laptop):
 
 ```bash
 python -m codingworkspace.support_diagnostics purge
 ```
+
+Use the course's [suspended purge template](https://github.com/kevinlb1/CodingWorkspace/blob/0297a28182b3c08dd0538f22179dfac19a145470/deploy/kubernetes/central-services/operations/support-diagnostics-purge.template.yaml),
+adapted to the LTIC config/Secret names, admitted image, database egress and job
+monitoring. Its separate pod label must not match the control HTTP Service. Enable it and verify a successful run
+before connecting collectors. This is scheduled maintenance, not a request for
+Pan to run a command manually each day.
 
 Connected student pods report bounded, redacted log tails, preview states and
 available memory/throttling/OOM counters during normal control synchronization

@@ -16,7 +16,7 @@ maintained separately; merging these instructions does not deploy a service.
 ## Current staging deployment path
 
 1. Select the exact course-published digest and its receipt from the private
-   [course staging handoff](https://github.com/kevinlb1/CodingWorkspace/blob/main/deploy/ltic-media-activation/STAGING_IMAGE.md).
+   [course staging handoff](https://github.com/kevinlb1/CodingWorkspace/blob/3f21730ba5874af7546d53a3d26af382166cb917/deploy/ltic-media-activation/STAGING_IMAGE.md).
    Use the full commit holding that receipt as the promotion workflow's
    `receipt_ref`; do not substitute a moving tag or a review-build receipt.
 2. Run the promotion workflow's admission checks. It verifies the receipt,
