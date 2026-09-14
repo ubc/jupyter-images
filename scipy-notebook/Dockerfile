@@ -1,4 +1,4 @@
-ARG BASE_CONTAINER=quay.io/jupyter/scipy-notebook:hub-5.5.0
+ARG BASE_CONTAINER=quay.io/jupyter/scipy-notebook:2026-08-10
 FROM $BASE_CONTAINER
 
 LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>"
@@ -15,17 +15,6 @@ RUN apt-get update && \
     wkhtmltopdf && \
     apt-get clean && \
     apt-get autoremove -y
-
-# Install Node.js 22 LTS via NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs && \
-    apt-get clean
-
-# Install AI CLI tools
-RUN npm install -g \
-        @anthropic-ai/claude-code \
-        @google/gemini-cli \
-        @zed-industries/codex-acp
 
 USER ${NB_UID}
 
@@ -44,23 +33,19 @@ USER ${NB_UID}
 RUN mamba install -y -c conda-forge \
     gdal \
     geos \
-    proj && \
+    proj \
+    nodejs=22 && \
     mamba clean -afy
 
-# pip
-RUN pip install --no-cache-dir \
-    altair \
-    pdfkit \
-    PyPDF2 \
-    uncertainties \
-    "vegafusion[embed]" \
-    "vegafusion-jupyter[embed]" \
-    vl-convert-python \
-    jupyter-ai \
-    jupyter-ai-jupyternaut \
-    openai \
-    anthropic \
-    google-genai
+# Install AI CLI tools (pinned)
+RUN npm install -g \
+        @anthropic-ai/claude-code@2.1.270 \
+        @google/gemini-cli@0.59.0 \
+        @zed-industries/codex-acp@0.16.0
+
+# pip - single resolution against the locked requirements/constraints pair
+COPY scipy-notebook/requirements.txt scipy-notebook/constraints.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements.txt -c /tmp/constraints.txt
 
 # Fix ownership in case root touched files
 USER root
