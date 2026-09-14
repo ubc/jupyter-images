@@ -1,9 +1,6 @@
 #!/bin/bash
 set -e
 
-echo "Upgrading setuptools and pip..."
-pip install --upgrade pip setuptools
-
 echo "Installing common Python packages..."
 pip install nbgitpuller \
     jupyterlab-lsp \
@@ -12,6 +9,6 @@ pip install nbgitpuller \
     jupyterlab_templates \
     jupyter-resource-usage \
     otter-grader \
-    jupytext --upgrade
+    jupytext
 
 echo "Installation complete!"

@@ -1,4 +1,4 @@
-ARG BASE_CONTAINER=quay.io/jupyter/r-notebook:hub-5.5.0
+ARG BASE_CONTAINER=quay.io/jupyter/r-notebook:2026-08-10
 FROM $BASE_CONTAINER
 
 LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>"
@@ -15,17 +15,6 @@ RUN apt-get update && \
 #    cmake && \
     apt-get clean && \
     apt-get autoremove -y
-
-# Install Node.js 22 LTS via NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs && \
-    apt-get clean
-
-# Install AI CLI tools
-RUN npm install -g \
-        @anthropic-ai/claude-code \
-        @google/gemini-cli \
-        @zed-industries/codex-acp
 
 USER ${NB_UID}
 
@@ -48,8 +37,15 @@ RUN mamba install --yes -c conda-forge \
     r-tidytext \
     r-car \
     r-units \
-    r-sf && \
+    r-sf \
+    nodejs=22 && \
     mamba clean --all -f -y
+
+# Install AI CLI tools (pinned)
+RUN npm install -g \
+        @anthropic-ai/claude-code@2.1.270 \
+        @google/gemini-cli@0.59.0 \
+        @zed-industries/codex-acp@0.16.0
 
 # R packages from CRAN (source)
 RUN R -e "install.packages(c( \
@@ -59,18 +55,16 @@ RUN R -e "install.packages(c( \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/lisp/lisp_0.1.tar.gz', repos=NULL, type='source')" && \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/translate/translate_0.1.2.tar.gz', repos=NULL, type='source')"
 
-# pip - AI provider SDKs
-RUN pip install --no-cache-dir \
-    anthropic \
-    openai \
-    google-genai
-
 # Copy and run common install script
 USER root
 COPY install-common.sh /tmp/install-common.sh
 RUN chown jovyan:users /tmp/install-common.sh && chmod +x /tmp/install-common.sh
 USER ${NB_UID}
 RUN /bin/bash -x /tmp/install-common.sh
+
+# pip - single resolution against the locked requirements/constraints pair
+COPY r-notebook/requirements.txt r-notebook/constraints.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements.txt -c /tmp/constraints.txt
 
 # Fix R locale issue
 RUN echo "LC_ALL=en_US.UTF-8" >> /opt/conda/lib/R/etc/Renviron

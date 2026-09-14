@@ -150,6 +150,22 @@ jobs:
             aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null 2>&1 || true
           fi
           docker buildx build --load -f "$IMAGE_NAME/Dockerfile" -t "$repository:$tag" .
+
+          # Post-build smoke test: catches jupyter-ai (and the
+          # jupyter-server-documents extension it pulls in) creeping back
+          # into these two images, and any labextension/server-extension
+          # breakage from the dependency changes.
+          if [ "$IMAGE_NAME" = scipy-notebook ] || [ "$IMAGE_NAME" = r-notebook ]; then
+            echo "Running smoke test on $repository:$tag"
+            docker run --rm "$repository:$tag" bash -c '
+              set -e
+              pip show jupyter-server-documents >/dev/null 2>&1 && { echo "FAIL: jupyter-server-documents present"; exit 1; }
+              pip show jupyter-ai >/dev/null 2>&1 && { echo "FAIL: jupyter-ai present"; exit 1; }
+              jupyter labextension list 2>&1 | grep -q " X " && { echo "FAIL: incompatible labextension"; exit 1; }
+              jupyter server extension list 2>&1 | grep -qi "validation failed" && { echo "FAIL: server extension validation"; exit 1; }
+              echo OK'
+          fi
+
           docker push "$repository:$tag"
           docker tag "$repository:$tag" "$repository:latest"
           docker push "$repository:latest"
