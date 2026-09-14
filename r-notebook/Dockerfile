@@ -59,10 +59,8 @@ RUN R -e "install.packages(c( \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/lisp/lisp_0.1.tar.gz', repos=NULL, type='source')" && \
     R -e "install.packages('https://cran.r-project.org/src/contrib/Archive/translate/translate_0.1.2.tar.gz', repos=NULL, type='source')"
 
-# pip - jupyter-ai
+# pip - AI provider SDKs
 RUN pip install --no-cache-dir \
-    jupyter-ai \
-    jupyter-ai-jupyternaut \
     anthropic \
     openai \
     google-genai
