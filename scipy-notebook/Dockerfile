@@ -56,8 +56,6 @@ RUN pip install --no-cache-dir \
     "vegafusion[embed]" \
     "vegafusion-jupyter[embed]" \
     vl-convert-python \
-    jupyter-ai \
-    jupyter-ai-jupyternaut \
     openai \
     anthropic \
     google-genai
