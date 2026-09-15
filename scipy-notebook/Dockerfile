@@ -1,4 +1,4 @@
-ARG BASE_CONTAINER=quay.io/jupyter/scipy-notebook:2026-08-10
+ARG BASE_CONTAINER=quay.io/jupyter/scipy-notebook:hub-5.5.0@sha256:85973d03f05c14f4da9c07b65e1eb24e05c4fa2cc40bf1092bcd18a7ea086945
 FROM $BASE_CONTAINER
 
 # Values come from RUNTIME_PINS.env at the repo root, passed in by CI as
