@@ -44,8 +44,12 @@ USER ${NB_UID}
 RUN mamba install -y -c conda-forge \
     gdal \
     geos \
-    proj \
-    nodejs=22 && \
+    proj && \
+    mamba clean -afy
+
+# Node gets its own layer so a version bump doesn't invalidate the geo-libs
+# solve above it.
+RUN mamba install -y -c conda-forge nodejs=22 && \
     mamba clean -afy
 
 # Install AI CLI tools. Versions come from the ARGs above (CI reads them out
