@@ -828,6 +828,16 @@ case "$direct_code" in 401|403) ;; *) echo "direct backend returned $direct_code
 
 for route in api/contents api/kernels api/sessions api/terminals lab lab/ lab/tree/test.ipynb tree; do
   code=$(request_code "$fresh_container" "${BASE_URL}${route}" || true)
+  # Jupyter normalizes the trailing slash before the denial handler runs.
+  # Permit only this exact local redirect, then require the usual refusal.
+  if [ "$route" = lab/ ] && [ "$code" = 302 ]; then
+    location=$(docker exec "$fresh_container" curl -sS -o /dev/null -D - \
+      -H "Authorization: token $TOKEN" "http://127.0.0.1:8888${BASE_URL}${route}" \
+      | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
+    test "$location" = "${BASE_URL}lab"
+    code=$(request_code "$fresh_container" "$location")
+    echo "Verified /lab/ normalization to denied /lab: $code"
+  fi
   case "$code" in 403|404) ;; *) echo "Jupyter route /$route returned $code, expected 403/404" >&2; exit 1;; esac
 done
 
@@ -894,7 +904,7 @@ assert_safe_stale_failure() {
   local name=$2
   start_server "$volume" "$name"
   wait_for_code "$name" "${BASE_URL}codingworkspace/" 503
-  docker exec "$name" grep -q 'CW-JH-STARTUP-001' /tmp/cw-smoke-response
+  docker exec "$name" grep -q 'CW-JH-STARTUP-002' /tmp/cw-smoke-response
   docker stop --time 30 "$name" >/dev/null
 }
 
