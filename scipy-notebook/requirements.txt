@@ -3,8 +3,4 @@ pdfkit
 PyPDF2
 uncertainties
 vegafusion[embed]
-vegafusion-jupyter[embed]
 vl-convert-python
-openai
-anthropic
-google-genai
