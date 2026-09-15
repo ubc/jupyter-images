@@ -1,0 +1,62 @@
+# Shared pip constraints for scipy-notebook and r-notebook, exported as
+# PIP_CONSTRAINT in both Dockerfiles so install-common.sh and each image's
+# requirements.txt resolve against the same pins.
+#
+# NOTE: hand-assembled from verified installs against the pinned base images,
+# not yet a full pip-compile closure (see PR review point 6). Regenerate with
+# pip-compile against the combined requirements before merging:
+#   pip-compile --no-header --no-annotate --strip-extras \
+#     -o constraints.txt requirements.txt scipy-notebook/requirements.txt
+
+# --- freshly resolved by pip (verified via real installs) ---
+PyPDF2==3.0.1
+anthropic==1.5.0
+arro3-core==0.8.2
+docstring-parser==0.18.0
+google-auth==2.58.0
+google-genai==2.23.0
+httpcore2==2.13.0
+httpx2==2.13.0
+jiter==0.17.0
+openai==3.13.0
+pdfkit==1.0.0
+pyasn1==0.6.4
+pyasn1-modules==0.4.2
+tenacity==9.1.4
+uncertainties==3.2.3
+vegafusion==2.0.3
+vl-convert-python==1.9.0.post1
+websockets==16.1.1
+
+# --- already present in the pinned base image, pinned here so they can't
+#     silently float if a future package pulls a different version ---
+altair==6.2.2
+Jinja2==3.1.6
+jsonschema==4.26.0
+narwhals==2.24.0
+packaging==26.3
+typing_extensions==4.16.0
+anyio==4.14.2
+pydantic==2.13.4
+pydantic_core==2.46.4
+sniffio==1.3.1
+idna==3.18
+truststore==0.10.4
+h11==0.16.0
+annotated-types==0.8.0
+typing-inspection==0.4.2
+httpx==0.28.1
+httpcore==1.0.9
+requests==2.34.2
+distro==1.9.0
+cryptography==50.0.0
+certifi==2026.7.22
+charset-normalizer==3.4.9
+urllib3==2.7.0
+cffi==2.1.1
+pycparser==3.0
+attrs==26.1.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3
+MarkupSafe==3.0.3
