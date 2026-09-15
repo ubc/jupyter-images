@@ -48,18 +48,8 @@ RUN mamba install --yes -c conda-forge \
     r-tidytext \
     r-car \
     r-units \
-    r-sf \
-    nodejs=22 && \
+    r-sf && \
     mamba clean --all -f -y
-
-# Install AI CLI tools. Versions come from the ARGs above (CI reads them out
-# of RUNTIME_PINS.env and passes them as --build-arg). The raw file is also
-# baked in so a running container can be checked against its own pins.
-COPY RUNTIME_PINS.env /etc/runtime-pins.env
-RUN npm install -g \
-        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-        "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
-        "@zed-industries/codex-acp@${CODEX_ACP_VERSION}"
 
 # R packages from CRAN (source)
 RUN R -e "install.packages(c( \
@@ -75,6 +65,23 @@ COPY install-common.sh /tmp/install-common.sh
 RUN chown jovyan:users /tmp/install-common.sh && chmod +x /tmp/install-common.sh
 USER ${NB_UID}
 RUN /bin/bash -x /tmp/install-common.sh
+
+# Node gets its own layer, placed after the heavy R/CRAN/install-common
+# layers (not folded into the mamba solve above), so a node bump doesn't
+# force a re-download of the R conda stack or a CRAN recompile.
+RUN mamba install -y -c conda-forge nodejs=22 && \
+    mamba clean --all -f -y
+
+# Install AI CLI tools. Versions come from the ARGs above (CI reads them out
+# of RUNTIME_PINS.env and passes them as --build-arg). The raw file is also
+# baked in so a running container can be checked against its own pins.
+# Placed below the heavy R/CRAN/install-common layers so a CLI version bump
+# only costs this layer, not a recompile of everything above it.
+COPY RUNTIME_PINS.env /etc/runtime-pins.env
+RUN npm install -g \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
+        "@zed-industries/codex-acp@${CODEX_ACP_VERSION}"
 
 # pip - single resolution against the shared requirements, governed by the
 # shared constraints via PIP_CONSTRAINT above
