@@ -169,11 +169,20 @@ jobs:
           if [ "$IMAGE_NAME" = scipy-notebook ] || [ "$IMAGE_NAME" = r-notebook ]; then
             echo "Running smoke test on $repository:$tag"
             docker run --rm "$repository:$tag" bash -c '
-              set -e
+              set -eo pipefail
               pip show jupyter-server-documents >/dev/null 2>&1 && { echo "FAIL: jupyter-server-documents present"; exit 1; }
               pip show jupyter-ai >/dev/null 2>&1 && { echo "FAIL: jupyter-ai present"; exit 1; }
-              jupyter labextension list 2>&1 | grep -q " X " && { echo "FAIL: incompatible labextension"; exit 1; }
-              jupyter server extension list 2>&1 | grep -qi "validation failed" && { echo "FAIL: server extension validation"; exit 1; }
+              # Capture each jupyter command output explicitly so a crash
+              # (non-zero exit) is caught directly, rather than relying on
+              # grep -q against a pipe -- grep also exits 1 on a genuinely
+              # clean report, so a crash and a clean report are otherwise
+              # indistinguishable to an `&&`-chained check.
+              labext=$(jupyter labextension list 2>&1) || { echo "FAIL: jupyter labextension list crashed"; exit 1; }
+              # JupyterLab prints the failure marker as ESC[31m X ESC[0m; strip
+              # ANSI color codes first or the literal " X " never matches.
+              echo "$labext" | sed -E "s/\x1b\[[0-9;]*m//g" | grep -q " X " && { echo "FAIL: incompatible labextension"; exit 1; }
+              srvext=$(jupyter server extension list 2>&1) || { echo "FAIL: jupyter server extension list crashed"; exit 1; }
+              echo "$srvext" | grep -qi "validation failed" && { echo "FAIL: server extension validation"; exit 1; }
               echo OK'
           fi
 
