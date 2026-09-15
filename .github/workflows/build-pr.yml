@@ -142,9 +142,17 @@ jobs:
               --build-arg "CODEX_ACP_VERSION=$CODEX_ACP_VERSION"
             )
           fi
+          image_ref="local/pr-${IMAGE_NAME}:${GITHUB_SHA::7}"
           docker buildx build --load "${build_args[@]}" \
             -f "$IMAGE_NAME/Dockerfile" \
-            -t "local/pr-${IMAGE_NAME}:${GITHUB_SHA::7}" .
+            -t "$image_ref" .
+
+          # Same convention as build.yml: run the image's own ci/smoke.sh, if
+          # present, so a broken image fails on the PR instead of after merge.
+          if [ -x "$IMAGE_NAME/ci/smoke.sh" ]; then
+            echo "Running smoke test on $image_ref"
+            "$IMAGE_NAME/ci/smoke.sh" "$image_ref"
+          fi
 
   probe-pr-codingworkspace-contexts:
     name: Probe CodingWorkspace source contexts (secret-free; not full image)
