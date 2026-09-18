@@ -1,5 +1,11 @@
-ARG BASE_CONTAINER=quay.io/jupyter/scipy-notebook:hub-5.5.0
+ARG BASE_CONTAINER=quay.io/jupyter/scipy-notebook:hub-5.5.0@sha256:85973d03f05c14f4da9c07b65e1eb24e05c4fa2cc40bf1092bcd18a7ea086945
 FROM $BASE_CONTAINER
+
+# Values come from RUNTIME_PINS.env at the repo root, passed in by CI as
+# --build-arg (see build.yml / build-pr.yml), shared with r-notebook.
+ARG CLAUDE_CODE_VERSION
+ARG GEMINI_CLI_VERSION
+ARG CODEX_ACP_VERSION
 
 LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>"
 
@@ -16,18 +22,12 @@ RUN apt-get update && \
     apt-get clean && \
     apt-get autoremove -y
 
-# Install Node.js 22 LTS via NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs && \
-    apt-get clean
-
-# Install AI CLI tools
-RUN npm install -g \
-        @anthropic-ai/claude-code \
-        @google/gemini-cli \
-        @zed-industries/codex-acp
-
 USER ${NB_UID}
+
+# Shared pip constraints govern every pip install below, including
+# install-common.sh's, via PIP_CONSTRAINT.
+COPY constraints.txt /tmp/constraints.txt
+ENV PIP_CONSTRAINT=/tmp/constraints.txt
 
 # Copy and run common install script
 USER root
@@ -47,18 +47,25 @@ RUN mamba install -y -c conda-forge \
     proj && \
     mamba clean -afy
 
-# pip
-RUN pip install --no-cache-dir \
-    altair \
-    pdfkit \
-    PyPDF2 \
-    uncertainties \
-    "vegafusion[embed]" \
-    "vegafusion-jupyter[embed]" \
-    vl-convert-python \
-    openai \
-    anthropic \
-    google-genai
+# Node gets its own layer so a version bump doesn't invalidate the geo-libs
+# solve above it.
+RUN mamba install -y -c conda-forge nodejs=22 && \
+    mamba clean -afy
+
+# Install AI CLI tools. Versions come from the ARGs above (CI reads them out
+# of RUNTIME_PINS.env and passes them as --build-arg). The raw file is also
+# baked in so a running container can be checked against its own pins.
+COPY RUNTIME_PINS.env /etc/runtime-pins.env
+RUN npm install -g \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
+        "@zed-industries/codex-acp@${CODEX_ACP_VERSION}"
+
+# pip - single resolution against the shared + image requirements, governed
+# by the shared constraints via PIP_CONSTRAINT above
+COPY requirements.txt /tmp/requirements-common.txt
+COPY scipy-notebook/requirements.txt /tmp/requirements-image.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-common.txt -r /tmp/requirements-image.txt
 
 # Fix ownership in case root touched files
 USER root

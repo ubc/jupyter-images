@@ -149,7 +149,29 @@ jobs:
           if ! aws ecr describe-repositories --repository-names "$IMAGE_NAME" >/dev/null 2>&1; then
             aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null 2>&1 || true
           fi
-          docker buildx build --load -f "$IMAGE_NAME/Dockerfile" -t "$repository:$tag" .
+
+          build_args=()
+          if [ "$IMAGE_NAME" = scipy-notebook ] || [ "$IMAGE_NAME" = r-notebook ]; then
+            . RUNTIME_PINS.env
+            build_args+=(
+              --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION"
+              --build-arg "GEMINI_CLI_VERSION=$GEMINI_CLI_VERSION"
+              --build-arg "CODEX_ACP_VERSION=$CODEX_ACP_VERSION"
+            )
+          fi
+
+          docker buildx build --load "${build_args[@]}" -f "$IMAGE_NAME/Dockerfile" -t "$repository:$tag" .
+
+          # Post-build smoke test: if the image directory has a ci/smoke.sh,
+          # run it against the freshly built image before pushing. Keeps
+          # assertions next to the Dockerfile they describe instead of
+          # hardcoded here (same convention as codingworkspace's
+          # ci/smoke-image.sh).
+          if [ -x "$IMAGE_NAME/ci/smoke.sh" ]; then
+            echo "Running smoke test on $repository:$tag"
+            "$IMAGE_NAME/ci/smoke.sh" "$repository:$tag"
+          fi
+
           docker push "$repository:$tag"
           docker tag "$repository:$tag" "$repository:latest"
           docker push "$repository:latest"
