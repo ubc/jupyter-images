@@ -1,4 +1,4 @@
-ARG BASE_CONTAINER=quay.io/jupyter/tensorflow-notebook:hub-5.5.0
+ARG BASE_CONTAINER=quay.io/jupyter/tensorflow-notebook:hub-5.5.1@sha256:b0b757cab79d17a65400e03e2e837a2d7cc10d9cbc97a0b082a197f65e2cba4b
 FROM $BASE_CONTAINER
 
 LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>"

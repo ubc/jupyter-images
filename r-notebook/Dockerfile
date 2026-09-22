@@ -1,11 +1,5 @@
-ARG BASE_CONTAINER=quay.io/jupyter/r-notebook:hub-5.5.0@sha256:240544c252d9aec828dca9a54652d2388f922796c8bd0b31ae8bd918731688fd
+ARG BASE_CONTAINER=quay.io/jupyter/r-notebook:hub-5.5.1@sha256:68692c9b09177a2ea0841172674eddfdb7c3f230812e25cb8ec57b6eb402fa24
 FROM $BASE_CONTAINER
-
-# Values come from RUNTIME_PINS.env at the repo root, passed in by CI as
-# --build-arg (see build.yml / build-pr.yml), shared with scipy-notebook.
-ARG CLAUDE_CODE_VERSION
-ARG GEMINI_CLI_VERSION
-ARG CODEX_ACP_VERSION
 
 LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>"
 
@@ -24,10 +18,10 @@ RUN apt-get update && \
 
 USER ${NB_UID}
 
-# Shared pip constraints govern every pip install below, including
-# install-common.sh's, via PIP_CONSTRAINT.
+# Shared pip constraints apply at build time only: each pip-running RUN below
+# sets PIP_CONSTRAINT inline. Deliberately not an ENV, so student pods can
+# install any package version (a server restart returns them to the pins).
 COPY constraints.txt /tmp/constraints.txt
-ENV PIP_CONSTRAINT=/tmp/constraints.txt
 
 # R packages via mamba (conda-forge)
 RUN mamba install --yes -c conda-forge \
@@ -64,7 +58,7 @@ USER root
 COPY install-common.sh /tmp/install-common.sh
 RUN chown jovyan:users /tmp/install-common.sh && chmod +x /tmp/install-common.sh
 USER ${NB_UID}
-RUN /bin/bash -x /tmp/install-common.sh
+RUN PIP_CONSTRAINT=/tmp/constraints.txt /bin/bash -x /tmp/install-common.sh
 
 # Node gets its own layer, placed after the heavy R/CRAN/install-common
 # layers (not folded into the mamba solve above), so a node bump doesn't
@@ -72,21 +66,27 @@ RUN /bin/bash -x /tmp/install-common.sh
 RUN mamba install -y -c conda-forge nodejs=22 && \
     mamba clean --all -f -y
 
-# Install AI CLI tools. Versions come from the ARGs above (CI reads them out
-# of RUNTIME_PINS.env and passes them as --build-arg). The raw file is also
-# baked in so a running container can be checked against its own pins.
+# Install AI CLI tools. Versions are sourced from RUNTIME_PINS.env (repo root,
+# shared with scipy-notebook), baked in at /etc/runtime-pins.env so a running
+# container can be checked against its own pins. The :? guards fail the build
+# if a pin is missing, instead of npm silently installing latest.
 # Placed below the heavy R/CRAN/install-common layers so a CLI version bump
 # only costs this layer, not a recompile of everything above it.
 COPY RUNTIME_PINS.env /etc/runtime-pins.env
-RUN npm install -g \
+RUN . /etc/runtime-pins.env && \
+    : "${CLAUDE_CODE_VERSION:?missing in RUNTIME_PINS.env}" \
+      "${GEMINI_CLI_VERSION:?missing in RUNTIME_PINS.env}" \
+      "${CODEX_ACP_VERSION:?missing in RUNTIME_PINS.env}" && \
+    npm install -g \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
         "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
         "@zed-industries/codex-acp@${CODEX_ACP_VERSION}"
 
 # pip - single resolution against the shared requirements, governed by the
-# shared constraints via PIP_CONSTRAINT above
+# shared constraints (build-time only, set inline)
 COPY requirements.txt /tmp/requirements-common.txt
-RUN pip install --no-cache-dir -r /tmp/requirements-common.txt
+RUN PIP_CONSTRAINT=/tmp/constraints.txt pip install --no-cache-dir \
+        -r /tmp/requirements-common.txt
 
 # Fix R locale issue
 RUN echo "LC_ALL=en_US.UTF-8" >> /opt/conda/lib/R/etc/Renviron
