@@ -150,17 +150,7 @@ jobs:
             aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null 2>&1 || true
           fi
 
-          build_args=()
-          if [ "$IMAGE_NAME" = scipy-notebook ] || [ "$IMAGE_NAME" = r-notebook ]; then
-            . RUNTIME_PINS.env
-            build_args+=(
-              --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION"
-              --build-arg "GEMINI_CLI_VERSION=$GEMINI_CLI_VERSION"
-              --build-arg "CODEX_ACP_VERSION=$CODEX_ACP_VERSION"
-            )
-          fi
-
-          docker buildx build --load "${build_args[@]}" -f "$IMAGE_NAME/Dockerfile" -t "$repository:$tag" .
+          docker buildx build --load -f "$IMAGE_NAME/Dockerfile" -t "$repository:$tag" .
 
           # Post-build smoke test: if the image directory has a ci/smoke.sh,
           # run it against the freshly built image before pushing. Keeps

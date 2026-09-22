@@ -133,17 +133,8 @@ jobs:
           IMAGE_NAME: ${{ matrix.image }}
         run: |
           set -euo pipefail
-          build_args=()
-          if [ "$IMAGE_NAME" = scipy-notebook ] || [ "$IMAGE_NAME" = r-notebook ]; then
-            . RUNTIME_PINS.env
-            build_args+=(
-              --build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION"
-              --build-arg "GEMINI_CLI_VERSION=$GEMINI_CLI_VERSION"
-              --build-arg "CODEX_ACP_VERSION=$CODEX_ACP_VERSION"
-            )
-          fi
           image_ref="local/pr-${IMAGE_NAME}:${GITHUB_SHA::7}"
-          docker buildx build --load "${build_args[@]}" \
+          docker buildx build --load \
             -f "$IMAGE_NAME/Dockerfile" \
             -t "$image_ref" .
 
