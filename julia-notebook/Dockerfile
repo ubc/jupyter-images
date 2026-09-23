@@ -1,4 +1,4 @@
-ARG BASE_CONTAINER=quay.io/jupyter/julia-notebook:hub-5.5.1@sha256:76497661c150628f60a410efea6efd23921243b2340af9a561e7796dcf3f53a8
+ARG BASE_CONTAINER=quay.io/jupyter/julia-notebook:hub-5.5.1@sha256:3adc1ab4c71f9c532edc6ff6d6ae157e026aa4748b4166105c4dfd17a8899b56
 FROM $BASE_CONTAINER
 
 LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>"
