@@ -1,3 +1,5 @@
+import os
+
 from ngshare_exchange import configureExchange
 
 c = get_config()
