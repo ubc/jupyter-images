@@ -1,9 +1,10 @@
-# Shared pip constraints for scipy-notebook and r-notebook, exported as
-# PIP_CONSTRAINT in both Dockerfiles so install-common.sh and each image's
-# requirements.txt resolve against the same pins.
+# Shared pip constraints for scipy-notebook and r-notebook, passed as
+# PIP_CONSTRAINT=constraints.txt per-RUN in both Dockerfiles (not a
+# persistent ENV -- it doesn't reach student pods) so install-common.sh
+# and each image's requirements.txt resolve against the same pins.
 #
 # Generated with pip-compile against the pinned scipy-notebook base image
-# (quay.io/jupyter/scipy-notebook@sha256:85973d03f05c14f4da9c07b65e1eb24e05c4fa2cc40bf1092bcd18a7ea086945),
+# (quay.io/jupyter/scipy-notebook:hub-5.5.1@sha256:41e9176dc64072976c43c037f853ae9a95ca34aeb0170c58a1b304d62fbde486),
 # scipy-notebook being the superset of what r-notebook needs, and covering
 # install-common.sh's own packages too so its pip install is genuinely
 # governed by these pins, not just nominally. jupyterlab is capped below
@@ -15,13 +16,13 @@
 #   sed -n 's/^pip install//p; /^    /p' install-common.sh | tr -d '\\' >> /tmp/req.in
 #   pip-compile --no-header --no-annotate --strip-extras -o constraints.txt /tmp/req.in
 alabaster==1.0.0
-altair==6.2.2
+altair==6.3.0
 annotated-types==0.8.0
-anthropic==1.5.0
+anthropic==1.8.0
 anyio==4.15.1
 argon2-cffi==25.1.0
 argon2-cffi-bindings==26.1.0
-arro3-core==0.8.2
+arro3-core==0.8.3
 arrow==1.4.0
 asttokens==3.0.2
 async-lru==2.3.0
@@ -35,7 +36,7 @@ charset-normalizer==3.5.1
 click==8.5.0
 comm==0.2.3
 cryptography==50.0.1
-debugpy==1.8.21
+debugpy==1.8.22
 defusedxml==0.7.1
 dill==0.4.1
 distro==1.9.0
@@ -45,15 +46,15 @@ executing==2.2.1
 fastjsonschema==2.22.2
 fica==0.4.1
 fqdn==1.5.1
-google-auth==2.58.0
-google-genai==2.23.0
+google-auth==2.58.1
+google-genai==2.25.0
 greenlet==3.5.6
 h11==0.16.0
 httpcore==1.0.9
-httpcore2==2.13.0
+httpcore2==2.13.1
 httpx==0.28.1
-httpx2==2.13.0
-idna==3.19
+httpx2==2.13.1
+idna==3.20
 imagesize==2.0.1
 ipykernel==7.3.0
 ipylab==1.1.0
@@ -74,13 +75,13 @@ jupyter-core==5.9.1
 jupyter-events==0.12.1
 jupyter-lsp==2.3.1
 jupyter-resource-usage==1.3.0
-jupyter-server==2.21.0
+jupyter-server==2.21.1
 jupyter-server-terminals==0.5.4
-jupyterlab==4.6.3
+jupyterlab==4.6.4
 jupyterlab-code-formatter==3.1.0
 jupyterlab-lsp==5.3.0
 jupyterlab-pygments==0.3.0
-jupyterlab-server==2.28.0
+jupyterlab-server==2.28.1
 jupyterlab-spreadsheet-editor==0.7.2
 jupyterlab-templates==0.5.3
 jupyterlab-widgets==3.0.17
@@ -97,19 +98,19 @@ nbclient==0.11.0
 nbconvert==7.17.1
 nbformat==5.11.1
 nbgitpuller==1.3.0
-nest-asyncio2==1.7.2
+nest-asyncio2==1.7.3
 notebook-shim==0.2.4
 numpy==2.5.3
-openai==3.14.0
+openai==3.19.2
 otter-grader==7.0.0
 packaging==26.3
-pandas==3.0.5
+pandas==3.0.6
 pandocfilters==1.5.1
 parso==0.8.7
 pdfkit==1.0.0
 pexpect==4.9.0
-platformdirs==4.11.8
-playwright==1.62.0
+platformdirs==4.11.14
+playwright==1.63.0
 prometheus-client==0.26.0
 prompt-toolkit==3.0.53
 psutil==7.2.2
@@ -140,7 +141,7 @@ send2trash==2.1.0
 six==1.17.0
 sniffio==1.3.1
 snowballstemmer==3.1.1
-soupsieve==2.9.2
+soupsieve==2.10
 sphinx==9.1.0
 sphinxcontrib-applehelp==2.0.0
 sphinxcontrib-devhelp==2.0.0
@@ -160,10 +161,10 @@ typing-inspection==0.4.4
 tzdata==2026.4
 uncertainties==3.2.3
 uri-template==1.3.0
-urllib3==2.7.0
+urllib3==2.8.0
 vegafusion==2.0.3
 vl-convert-python==1.9.0.post1
-wcwidth==0.8.3
+wcwidth==0.9.1
 webcolors==25.10.0
 webencodings==0.6.1
 websocket-client==1.9.2

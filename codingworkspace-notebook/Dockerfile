@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # codingworkspace-notebook: a narrow JupyterHub single-user image. Jupyter
 # Server provides Hub OAuth/activity and one authenticated named proxy only.
-ARG BASE_CONTAINER=quay.io/jupyter/base-notebook:hub-5.5.0@sha256:e6f115af0bc688b884bec4e00523512deb808972e117797608fa1bf29931714a
+ARG BASE_CONTAINER=quay.io/jupyter/base-notebook:hub-5.5.1@sha256:292da16615e356b8b1258dab58f86386d9624e2a9532fc1d7ab1d6585dc7773a
 
 # Fork pull requests cannot receive the private CodingWorkspace source. This
 # scratch target still exercises the production bundle-only named-context
@@ -22,7 +22,7 @@ ARG DEPENDENCY_BUILDER_REF
 ARG DEPENDENCY_BUILDER_BLOB
 ARG DEPENDENCY_WHEEL_INDEX_URL
 LABEL course="AI100" \
-      org.opencontainers.image.base.name="quay.io/jupyter/base-notebook:hub-5.5.0@sha256:e6f115af0bc688b884bec4e00523512deb808972e117797608fa1bf29931714a" \
+      org.opencontainers.image.base.name="quay.io/jupyter/base-notebook:hub-5.5.1@sha256:292da16615e356b8b1258dab58f86386d9624e2a9532fc1d7ab1d6585dc7773a" \
       org.codingworkspace.node-version="22.23.2" \
       org.codingworkspace.opencode-version="${OPENCODE_VERSION}"
 
