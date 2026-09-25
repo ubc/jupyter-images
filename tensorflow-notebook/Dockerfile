@@ -1,4 +1,4 @@
-ARG BASE_CONTAINER=quay.io/jupyter/tensorflow-notebook:hub-5.5.0
+ARG BASE_CONTAINER=quay.io/jupyter/tensorflow-notebook:hub-5.5.1@sha256:b0b757cab79d17a65400e03e2e837a2d7cc10d9cbc97a0b082a197f65e2cba4b
 FROM $BASE_CONTAINER
 
 LABEL maintainer="Ryoko <ryoko.norden@ubc.ca>"
@@ -38,13 +38,13 @@ RUN pip install --no-cache-dir \
     nbgrader \
     ngshare_exchange
 
-# Add nbgrader config for nbshare (both global and user level)
-# Patch formgrader to remove Manage Students menu
+# Add nbgrader config for nbshare (course_id comes from the
+# NBGRADER_COURSE_ID env var set per-spawn by 13-nbgrader-course-id-env
+# Patch formgrader to hide Manage Students and Course List menus
 USER root
-COPY tensorflow-notebook/nbgrader_config_global.py /etc/jupyter/nbgrader_config.py
-COPY tensorflow-notebook/nbgrader_config_user.py /tmp/nbgrader_config.py
+COPY tensorflow-notebook/nbgrader_config.py /etc/jupyter/nbgrader_config.py
 COPY tensorflow-notebook/patch_formgrader.py /tmp/patch_formgrader.py
-RUN chmod 644 /etc/jupyter/nbgrader_config.py /tmp/nbgrader_config.py && \
+RUN chmod 644 /etc/jupyter/nbgrader_config.py && \
     chmod 755 /tmp/patch_formgrader.py
     
 # Run the patch

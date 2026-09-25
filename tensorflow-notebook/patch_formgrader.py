@@ -137,3 +137,26 @@ patch_file(
     new="            os.makedirs(os.path.dirname(dest_path), exist_ok=True)\n            with open(dest_path, 'wb') as d:",
     label="exchange.py: fix decode_dir to create parent directories"
 )
+
+# 7. Reword the "no available formgrader services" message in Course List.
+#    Course List is structurally non-functional for our ngshare-based
+#    architecture (it probes for a per-course JupyterHub service that we
+#    don't register - see confluence doc), so instead of hiding it we just
+#    make the empty state read as expected behavior, not an error.
+#    NOTE: the filename below is a webpack content hash that WILL change on
+#    nbgrader version bumps - if it does, patch_file() just prints [WARN]
+#    file not found and continues (same graceful-skip behavior as the rest
+#    of this script), so a version bump silently stops rewording rather than
+#    breaking the build. Re-run the grep from our debugging session to find
+#    the new hash if that happens.
+COURSE_LIST_JS_PATHS = [
+    "/opt/conda/share/jupyter/labextensions/@jupyter/nbgrader/static/603.9417528a77c0241e8e81.js",
+    f"/opt/conda/lib/python{PYTHON_VERSION}/site-packages/nbgrader/labextension/static/603.9417528a77c0241e8e81.js",
+]
+for _path in COURSE_LIST_JS_PATHS:
+    patch_file(
+        path=_path,
+        old='There are no available formgrader services.',
+        new='Course List is not used here - use Assignment List instead.',
+        label=f"course_list JS ({_path}): reword empty-state message"
+    )
