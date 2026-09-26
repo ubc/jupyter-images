@@ -54,7 +54,8 @@ RUN set -eux; \
         /etc/codingworkspace-dependency-layer.env; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        "bubblewrap=${BUBBLEWRAP_APT_VERSION}" ca-certificates curl git xz-utils; \
+        "bubblewrap=${BUBBLEWRAP_APT_VERSION}" ca-certificates curl git make xz-utils; \
+    make --version; \
     test "${TARGETARCH}" = "amd64"; \
     case "${TARGETARCH}" in \
         amd64) node_arch="x64"; node_sha256="${NODE_LINUX_AMD64_SHA256}"; opencode_arch="x64-baseline"; opencode_sha256="${OPENCODE_LINUX_AMD64_BASELINE_SHA256}" ;; \
