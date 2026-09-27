@@ -72,10 +72,18 @@ import importlib.metadata as md
 import importlib.util
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+# Exercise Makefile recipes as the notebook user, without network access.
+make_result = subprocess.run(
+    ["make", "--no-print-directory", "-f", "-", "check"],
+    input=".PHONY: check\ncheck:\n\t@echo make-ok\n",
+    text=True, capture_output=True, check=True, timeout=10,
+)
+assert make_result.stdout.strip() == "make-ok", make_result.stdout
 assert md.version("jupyter-server-proxy") == "4.5.0"
 assert md.version("jupyterhub") == "5.5.0"
 assert md.version("notebook") == "7.6.1"
