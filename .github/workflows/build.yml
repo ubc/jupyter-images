@@ -149,7 +149,19 @@ jobs:
           if ! aws ecr describe-repositories --repository-names "$IMAGE_NAME" >/dev/null 2>&1; then
             aws ecr create-repository --repository-name "$IMAGE_NAME" >/dev/null 2>&1 || true
           fi
+
           docker buildx build --load -f "$IMAGE_NAME/Dockerfile" -t "$repository:$tag" .
+
+          # Post-build smoke test: if the image directory has a ci/smoke.sh,
+          # run it against the freshly built image before pushing. Keeps
+          # assertions next to the Dockerfile they describe instead of
+          # hardcoded here (same convention as codingworkspace's
+          # ci/smoke-image.sh).
+          if [ -x "$IMAGE_NAME/ci/smoke.sh" ]; then
+            echo "Running smoke test on $repository:$tag"
+            "$IMAGE_NAME/ci/smoke.sh" "$repository:$tag"
+          fi
+
           docker push "$repository:$tag"
           docker tag "$repository:$tag" "$repository:latest"
           docker push "$repository:latest"

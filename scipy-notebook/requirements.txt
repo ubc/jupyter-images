@@ -1,0 +1,6 @@
+altair
+pdfkit
+PyPDF2
+uncertainties
+vegafusion[embed]
+vl-convert-python
