@@ -82,6 +82,29 @@ class PromotionGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / "commit.txt").read_text(encoding="utf-8").strip(), COMMIT)
 
+    def test_git_receipt_cannot_be_admitted_as_central(self):
+        body = receipt(image=f"ghcr.io/kevinlb1/codingworkspace-git@{DIGEST}")
+        self.assertEqual(self.check_receipt(body).returncode, 1)
+        result = self.run_gate("receipt", "--receipt", self.write("git.json", body),
+            "--digest", DIGEST, "--expect-repository", "ghcr.io/kevinlb1/codingworkspace-git",
+            "--write-source-commit", str(self.root / "git-commit.txt"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_git_admission_receipt_has_distinct_kind_and_preserves_digest(self):
+        output = self.root / "git-admission.json"
+        result = self.run_gate("admission-receipt", "--image-family", "git", "--digest", DIGEST,
+            "--source-repository", "ghcr.io/kevinlb1/codingworkspace-git",
+            "--destination-repository", "ghcr.io/ubc/codingworkspace-git",
+            "--tag", "promoted-git-r1-a1", "--source-commit", COMMIT,
+            "--course-receipt-path", "deploy/.../staging-receipt.json",
+            "--workflow-commit", "c" * 40, "--run-id", "1", "--attempt", "1",
+            "--output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads(output.read_text())
+        self.assertEqual(body["kind"], "CodingWorkspaceGitAdmissionReceipt")
+        self.assertEqual(body["promotedImage"], f"ghcr.io/ubc/codingworkspace-git@{DIGEST}")
+        self.assertFalse(body["studentActivation"])
+
     def test_receipt_for_a_different_digest_is_rejected(self):
         result = self.check_receipt(receipt(), digest=OTHER_DIGEST)
         self.assertEqual(result.returncode, 1)
