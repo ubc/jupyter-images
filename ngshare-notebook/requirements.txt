@@ -1,0 +1,5 @@
+SQLAlchemy==2.0.35
+alembic==1.20.0
+tornado==6.5.10
+jupyterhub==5.5.0
+requests==2.34.2
