@@ -239,7 +239,7 @@ RUN --mount=type=bind,from=cwsrc,target=/cwsrc \
         --requirement /tmp/proxy-requirements.txt; \
     pip install --no-cache-dir --no-deps --no-build-isolation /tmp/cwbuild; \
     pip check; \
-    python -c 'import importlib.metadata as m; assert m.version("jupyterhub") == "5.5.0"; assert m.version("jupyter-server-proxy") == "4.5.0"; assert m.version("aiohttp") == "3.14.3"; assert m.version("simpervisor") == "1.0.0"; assert m.version("notebook") == "7.6.1"; assert m.version("jupyterlab") == "4.6.2"'; \
+    python -c 'import importlib.metadata as m; assert m.version("jupyterhub") == "5.5.0"; assert m.version("jupyter-server-proxy") == "4.5.0"; assert m.version("aiohttp") == "3.14.3"; assert m.version("simpervisor") == "1.0.0"; assert m.version("notebook") == "7.6.1"; assert m.version("jupyterlab") == "4.6.2"; assert m.version("pyjwt") == "2.14.0"'; \
     python -I /tmp/verify_installed_source.py installed \
         --source /tmp/cwbuild --package codingworkspace; \
     rm -rf /tmp/cwbuild /tmp/cwrepo; \
