@@ -149,3 +149,15 @@ docker run --rm -i --network none --read-only --cap-drop ALL \
 
 The actual Docker image build, image scans and service activation are distinct
 checks. Passing the local unit suite does not claim any of those ran.
+
+## Institutional Git image admission
+
+`promote-cw-central.yml` also accepts `image_family=git`, retaining central as the
+default for existing dispatches. The Git path uses fixed
+`ghcr.io/kevinlb1/codingworkspace-git` and `ghcr.io/ubc/codingworkspace-git` names,
+the same protected publication environment, exact unique course receipt,
+source/revision/user checks, vulnerability policy, private destination checks
+before and after copying, and full OCI index preservation. The destination Git
+package must be pre-created private; keep `allow_package_creation=false`. A Git
+image must include provenance/attestation manifests just like the central image.
+Promotion does not activate a worker or grant GitHub permissions.

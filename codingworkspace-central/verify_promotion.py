@@ -148,7 +148,7 @@ def check_destination(arguments: argparse.Namespace) -> None:
 
 def write_admission_receipt(arguments: argparse.Namespace) -> None:
     receipt = {
-        "kind": "CodingWorkspaceCentralAdmissionReceipt",
+        "kind": "CodingWorkspaceGitAdmissionReceipt" if getattr(arguments, "image_family", "central") == "git" else "CodingWorkspaceCentralAdmissionReceipt",
         "schemaVersion": 1,
         "sourceImage": f"{arguments.source_repository}@{arguments.digest}",
         "promotedImage": f"{arguments.destination_repository}@{arguments.digest}",
@@ -197,6 +197,7 @@ def main() -> int:
     destination.set_defaults(handler=check_destination)
 
     admission = subcommands.add_parser("admission-receipt")
+    admission.add_argument("--image-family", choices=["central", "git"], default="central")
     admission.add_argument("--digest", required=True)
     admission.add_argument("--source-repository", required=True)
     admission.add_argument("--destination-repository", required=True)
