@@ -234,5 +234,53 @@ class PromotionGateTests(unittest.TestCase):
         self.assertFalse(body["studentActivation"])
 
 
+    def test_group_app_receipt_rejects_wrong_image_family(self):
+        body = receipt(image=f"ghcr.io/kevinlb1/codingworkspace-group-app@{DIGEST}")
+        self.assertEqual(self.check_receipt(body).returncode, 1)
+        result = self.run_gate("receipt", "--receipt", self.write("group-app.json", body),
+            "--digest", DIGEST, "--expect-repository", "ghcr.io/kevinlb1/codingworkspace-group-app",
+            "--write-source-commit", str(self.root / "group-app-commit.txt"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_group_app_uid_requires_its_fixed_runtime_identity(self):
+        body = config()
+        body["config"]["User"] = "10008:10008"
+        arguments = ("image", "--manifest", self.write("group-index.json", index()),
+            "--config", self.write("group-config.json", body),
+            "--source-commit", COMMIT, "--expect-source", SOURCE_URL)
+        self.assertEqual(self.run_gate(*arguments).returncode, 1)
+        result = self.run_gate(*arguments, "--expect-user", "10008:10008")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body["config"]["User"] = "0:0"
+        self.write("group-config.json", body)
+        self.assertEqual(self.run_gate(*arguments, "--expect-user", "10008:10008").returncode, 1)
+
+    def test_group_app_admission_receipt_is_bound_to_both_package_names(self):
+        for source, destination in (("group-app", "group-app"), ("git", "group-app"),
+                                    ("group-app", "central")):
+            with self.subTest(source=source, destination=destination):
+                output = self.root / "group-admission.json"
+                if output.exists():
+                    output.unlink()
+                result = self.run_gate("admission-receipt", "--image-family", "group-app",
+                    "--digest", DIGEST,
+                    "--source-repository", "ghcr.io/kevinlb1/codingworkspace-" + source,
+                    "--destination-repository", "ghcr.io/ubc/codingworkspace-" + destination,
+                    "--tag", "promoted-group-r1-a1", "--source-commit", COMMIT,
+                    "--course-receipt-path", "deploy/.../staging-receipt.json",
+                    "--workflow-commit", "c" * 40, "--run-id", "1", "--attempt", "1",
+                    "--output", str(output))
+                if (source, destination) == ("group-app", "group-app"):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    body = json.loads(output.read_text())
+                    self.assertEqual(body["kind"], "CodingWorkspaceGroupAppAdmissionReceipt")
+                    self.assertEqual(body["promotedImage"], f"ghcr.io/ubc/codingworkspace-group-app@{DIGEST}")
+                    self.assertFalse(body["studentActivation"])
+                else:
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertFalse(output.exists())
+
+
+
 if __name__ == "__main__":
     unittest.main()
