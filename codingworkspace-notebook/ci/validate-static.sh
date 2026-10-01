@@ -218,6 +218,9 @@ expected = {
     "aiohttp": "3.14.3",
     "jupyter-server-proxy": "4.5.0",
     "simpervisor": "1.0.0",
+    # Security override of the base image copy (CVE-2026-102268), not a proxy
+    # dependency; see the comment in proxy-requirements.txt. Remove together.
+    "pyjwt": "2.14.0",
 }
 seen: dict[str, str] = {}
 for requirement in logical:
