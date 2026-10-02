@@ -92,7 +92,10 @@ jobs:
 
   # Keep the repository's established build/push contract for the six images
   # not owned by CodingWorkspace: branch and tag pushes publish the short-SHA
-  # candidate and move latest, without imposing CW's SBOM/Trivy release gate.
+  # candidate, but only main/tag pushes move latest - an unreviewed branch
+  # push building and pushing its own uniquely-tagged image is fine (that's
+  # how a branch gets tested before merge); moving the default/moving tag
+  # from one is not (see ngshare-notebook PR review, 2026-10-01).
   build-and-push-ordinary:
     name: Build and push ${{ matrix.image }}
     needs: select-images
@@ -163,8 +166,19 @@ jobs:
           fi
 
           docker push "$repository:$tag"
-          docker tag "$repository:$tag" "$repository:latest"
-          docker push "$repository:latest"
+
+          # Only main/tag pushes move latest. A branch push still builds,
+          # smoke-tests and publishes its own uniquely-tagged image above -
+          # that's how a branch gets tested before merge - but it must never
+          # move the tag anything else defaults to, or an unreviewed branch's
+          # image becomes live the moment it's pushed (see ngshare-notebook
+          # PR review, 2026-10-01).
+          if [ "$GITHUB_REF" = "refs/heads/main" ] || [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            docker tag "$repository:$tag" "$repository:latest"
+            docker push "$repository:latest"
+          else
+            echo "Not main/tag ($GITHUB_REF) - skipping :latest move."
+          fi
 
   build-scan-publish:
     name: Build and publish hardened ${{ matrix.image }}
