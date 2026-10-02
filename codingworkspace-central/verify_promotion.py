@@ -147,8 +147,17 @@ def check_destination(arguments: argparse.Namespace) -> None:
 
 
 def write_admission_receipt(arguments: argparse.Namespace) -> None:
+    family = getattr(arguments, "image_family", "central")
+    kinds = {"central": "CodingWorkspaceCentralAdmissionReceipt",
+             "git": "CodingWorkspaceGitAdmissionReceipt",
+             "group-app": "CodingWorkspaceGroupAppAdmissionReceipt"}
+    require(family in kinds, "unsupported image family")
+    require(arguments.source_repository == "ghcr.io/kevinlb1/codingworkspace-" + family,
+            "source repository differs from selected image family")
+    require(arguments.destination_repository == "ghcr.io/ubc/codingworkspace-" + family,
+            "destination repository differs from selected image family")
     receipt = {
-        "kind": "CodingWorkspaceCentralAdmissionReceipt",
+        "kind": kinds[family],
         "schemaVersion": 1,
         "sourceImage": f"{arguments.source_repository}@{arguments.digest}",
         "promotedImage": f"{arguments.destination_repository}@{arguments.digest}",
@@ -197,6 +206,7 @@ def main() -> int:
     destination.set_defaults(handler=check_destination)
 
     admission = subcommands.add_parser("admission-receipt")
+    admission.add_argument("--image-family", choices=["central", "git", "group-app"], default="central")
     admission.add_argument("--digest", required=True)
     admission.add_argument("--source-repository", required=True)
     admission.add_argument("--destination-repository", required=True)

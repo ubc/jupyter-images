@@ -4,7 +4,7 @@ The course builds and publishes the central application image. Its native Hub
 verifier now ships in the application wheel; deployment does not wait for LTIC
 to choose a signer or verifier package, or for the course to package an adapter.
 LTIC deploys by admitting that published image through
-[Promote CodingWorkspace central image](../.github/workflows/promote-cw-central.yml).
+[Admit CodingWorkspace service image](../.github/workflows/promote-cw-central.yml).
 The separate review-build workflow below is for packaging inspection only.
 
 For the September 10 media rollout, use the
@@ -149,3 +149,38 @@ docker run --rm -i --network none --read-only --cap-drop ALL \
 
 The actual Docker image build, image scans and service activation are distinct
 checks. Passing the local unit suite does not claim any of those ran.
+
+## Institutional Git image admission
+
+`promote-cw-central.yml` also accepts `image_family=git`, retaining central as the
+default for existing dispatches. The Git path uses fixed
+`ghcr.io/kevinlb1/codingworkspace-git` and `ghcr.io/ubc/codingworkspace-git` names,
+the same protected publication environment, exact unique course receipt,
+source/revision/user checks, vulnerability policy, private destination checks
+before and after copying, and full OCI index preservation. The destination Git
+package must be pre-created private; keep `allow_package_creation=false`. A Git
+image must include provenance/attestation manifests just like the central image.
+Promotion does not activate a worker or grant GitHub permissions.
+
+## Shared app image admission
+
+The optional `image_family` is a fixed choice: `central`, `git`, or `group-app`.
+The default remains `central`; source/destination package names are fixed for
+each family. Shared apps use `ghcr.io/kevinlb1/codingworkspace-group-app` and the
+private `ghcr.io/ubc/codingworkspace-group-app` destination, with runtime UID/GID
+`10008:10008`. Central and Git keep `10001:10001`. A receipt from another family
+is refused, and shared-app admission has a distinct receipt kind.
+
+Select the exact published index and unique `staging-candidate-passed` receipt
+under `deploy/ltic-media-activation/staging/**/staging-receipt.json` in the private
+course repository. Pre-create the destination private, run `publish=false` to
+verify private pull access and all gates, then use the existing protected review
+for publication with `allow_package_creation=false`. No private application
+source or credentials are added to this repository.
+
+All families retain exact scanned/source/runtime identity, OCI provenance/SBOM
+index and digest-preserving copy, independent vulnerability checks and private
+package assertions before and after publication. The shared-app image executes
+student code: registry admission does not approve its cluster sandbox, quotas,
+storage, secrets, routing, multi-pod behavior, or student activation. Those
+remain separate managed-deployment and course acceptance gates.

@@ -28,3 +28,10 @@ jupyter-server-proxy==4.5.0 \
     --hash=sha256:3e3376f8de62aa86623e61d84076feafcaa731b5caf6deb5f0dd5f7a6e74fd24
 simpervisor==1.0.0 \
     --hash=sha256:3e313318264559beea3f475ead202bc1cd58a2f1288363abb5657d306c5b8388
+# Security override, not a proxy dependency: the pinned base ships PyJWT 2.13.0
+# (CVE-2026-102268, fixable CRITICAL, fixed in 2.14.0), which blocks the
+# fixable-CRITICAL gate on every rebuild. Pure Python with no required runtime
+# dependencies on 3.13, so --no-deps is safe; this replaces the base copy.
+# Drop it once the pinned base itself carries >= 2.14.0.
+pyjwt==2.14.0 \
+    --hash=sha256:ad0cef71c756a56e74863c2919cf0985f72decbcfcb550ee2f422e7c62b5eedc

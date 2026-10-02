@@ -1,4 +1,4 @@
-name: Promote CodingWorkspace central image
+name: Admit CodingWorkspace service image
 
 # The course team builds and publishes the central-service image; this workflow
 # admits a chosen digest to the platform registry. We do not rebuild their
@@ -31,6 +31,12 @@ name: Promote CodingWorkspace central image
 on:
   workflow_dispatch:
     inputs:
+      image_family:
+        description: Course image family to admit (central, Git workers, or shared apps)
+        required: false
+        type: choice
+        options: [central, git, group-app]
+        default: central
       digest:
         description: Index digest to promote, exactly as the course receipt records it (sha256:...)
         required: true
@@ -57,7 +63,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: promote-cw-central-${{ inputs.digest }}
+  group: promote-cw-${{ inputs.image_family || 'central' }}-${{ inputs.digest }}
   cancel-in-progress: false
 
 jobs:
@@ -76,11 +82,13 @@ jobs:
       contents: read
       packages: write
     env:
-      SOURCE_REPOSITORY: ghcr.io/kevinlb1/codingworkspace-central
+      IMAGE_FAMILY: ${{ inputs.image_family || 'central' }}
+      EXPECTED_USER: ${{ inputs.image_family == 'group-app' && '10008:10008' || '10001:10001' }}
+      SOURCE_REPOSITORY: ghcr.io/kevinlb1/codingworkspace-${{ inputs.image_family || 'central' }}
       SOURCE_URL: https://github.com/kevinlb1/CodingWorkspace
-      DESTINATION_REPOSITORY: ghcr.io/ubc/codingworkspace-central
+      DESTINATION_REPOSITORY: ghcr.io/ubc/codingworkspace-${{ inputs.image_family || 'central' }}
       DESTINATION_ORG: ubc
-      DESTINATION_PACKAGE: codingworkspace-central
+      DESTINATION_PACKAGE: codingworkspace-${{ inputs.image_family || 'central' }}
       CRANE_VERSION: v0.22.1
       CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
       DIGEST: ${{ inputs.digest }}
@@ -98,6 +106,7 @@ jobs:
       - name: Validate the requested references
         run: |
           set -euo pipefail
+          case "$IMAGE_FAMILY" in central|git|group-app) ;; *) echo 'unsupported image family' >&2; exit 1 ;; esac
           # Created up front, not beside the first artifact: the upload runs on
           # always(), so a missing directory turns one real failure into a
           # second, misleading "no files were found" error (run 34335016585).
@@ -247,7 +256,8 @@ jobs:
             --manifest evidence/source-index.json \
             --config evidence/source-config.json \
             --source-commit "$SOURCE_COMMIT" \
-            --expect-source "$SOURCE_URL"
+            --expect-source "$SOURCE_URL" \
+            --expect-user "$EXPECTED_USER"
 
       - name: Apply this side's vulnerability policy to the exact digest
         env:
@@ -260,8 +270,8 @@ jobs:
           export DOCKER_CONFIG="$RUNNER_TEMP/read-config"
           echo "$PULL_TOKEN" | docker login ghcr.io -u "$PULL_USER" --password-stdin
           docker pull --platform linux/amd64 "$SOURCE_REPOSITORY@$DIGEST"
-          docker tag "$SOURCE_REPOSITORY@$DIGEST" local/codingworkspace-central:promote
-          codingworkspace-notebook/ci/scan-local-image.sh local/codingworkspace-central:promote evidence
+          docker tag "$SOURCE_REPOSITORY@$DIGEST" "local/codingworkspace-$IMAGE_FAMILY:promote"
+          codingworkspace-notebook/ci/scan-local-image.sh "local/codingworkspace-$IMAGE_FAMILY:promote" evidence
 
       - name: Fetch the full index into an OCI layout
         run: |
@@ -332,6 +342,7 @@ jobs:
           python3 codingworkspace-central/verify_promotion.py admission-receipt \
             --digest "$DIGEST" \
             --source-repository "$SOURCE_REPOSITORY" \
+            --image-family "$IMAGE_FAMILY" \
             --destination-repository "$DESTINATION_REPOSITORY" \
             --tag "$(cat evidence/promoted-tag.txt)" \
             --source-commit "$SOURCE_COMMIT" \
@@ -354,7 +365,7 @@ jobs:
           PUBLISHED: ${{ inputs.publish }}
         run: |
           {
-            printf '### CodingWorkspace central promotion\n\n'
+            printf '### CodingWorkspace %s admission\n\n' "$IMAGE_FAMILY"
             printf -- '- Requested digest: `%s`\n' "$DIGEST"
             printf -- '- Source commit: `%s`\n' "${SOURCE_COMMIT:-unresolved}"
             printf -- '- Published: `%s`\n' "$PUBLISHED"
@@ -371,7 +382,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: central-promotion-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.image_family || 'central' }}-promotion-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence/
           if-no-files-found: error
           retention-days: 90
